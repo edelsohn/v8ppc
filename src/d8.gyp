@@ -29,6 +29,8 @@
   'includes': ['../build/common.gypi'],
   'variables': {
     'console%': '',
+    # Enable support for Intel VTune. Supported on ia32/x64 only
+    'v8_enable_vtunejit%': 0,
   },
   'targets': [
     {
@@ -45,6 +47,10 @@
         'd8.cc',
       ],
       'conditions': [
+        [ 'console=="readline"', {
+          'libraries': [ '-lreadline', ],
+          'sources': [ 'd8-readline.cc' ],
+        }],
         [ 'component!="shared_library"', {
           'sources': [ 'd8-debug.cc', '<(SHARED_INTERMEDIATE_DIR)/d8-js.cc', ],
           'conditions': [
@@ -57,10 +63,6 @@
                 'd8_js2c',
               ],
             }],
-            [ 'console=="readline"', {
-              'libraries': [ '-lreadline', ],
-              'sources': [ 'd8-readline.cc' ],
-            }],
             ['(OS=="linux" or OS=="mac" or OS=="freebsd" or OS=="netbsd" \
                or OS=="openbsd" or OS=="solaris" or OS=="android")', {
               'sources': [ 'd8-posix.cc', ]
@@ -68,6 +70,11 @@
             [ 'OS=="win"', {
               'sources': [ 'd8-windows.cc', ]
             }],
+          ],
+        }],
+        ['v8_enable_vtunejit==1', {
+          'dependencies': [
+            '../src/third_party/vtune/v8vtune.gyp:v8_vtune',
           ],
         }],
       ],

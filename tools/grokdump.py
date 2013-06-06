@@ -296,6 +296,42 @@ MINIDUMP_CONTEXT_X86 = Descriptor([
                 MD_CONTEXT_X86_EXTENDED_REGISTERS))
 ])
 
+MD_CONTEXT_ARM = 0x40000000
+MD_CONTEXT_ARM_INTEGER = (MD_CONTEXT_ARM | 0x00000002)
+MD_CONTEXT_ARM_FLOATING_POINT = (MD_CONTEXT_ARM | 0x00000004)
+MD_FLOATINGSAVEAREA_ARM_FPR_COUNT = 32
+MD_FLOATINGSAVEAREA_ARM_FPEXTRA_COUNT = 8
+
+MINIDUMP_FLOATING_SAVE_AREA_ARM = Descriptor([
+  ("fpscr", ctypes.c_uint64),
+  ("regs", ctypes.c_uint64 * MD_FLOATINGSAVEAREA_ARM_FPR_COUNT),
+  ("extra", ctypes.c_uint64 * MD_FLOATINGSAVEAREA_ARM_FPEXTRA_COUNT)
+])
+
+MINIDUMP_CONTEXT_ARM = Descriptor([
+  ("context_flags", ctypes.c_uint32),
+  # MD_CONTEXT_ARM_INTEGER.
+  ("r0", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r1", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r2", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r3", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r4", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r5", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r6", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r7", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r8", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r9", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r10", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r11", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("r12", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("sp", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("lr", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("pc", EnableOnFlag(ctypes.c_uint32, MD_CONTEXT_ARM_INTEGER)),
+  ("cpsr", ctypes.c_uint32),
+  ("float_save", EnableOnFlag(MINIDUMP_FLOATING_SAVE_AREA_ARM.ctype,
+                              MD_CONTEXT_ARM_FLOATING_POINT))
+])
+
 MD_CONTEXT_AMD64 = 0x00100000
 MD_CONTEXT_AMD64_CONTROL = (MD_CONTEXT_AMD64 | 0x00000001)
 MD_CONTEXT_AMD64_INTEGER = (MD_CONTEXT_AMD64 | 0x00000002)
@@ -429,6 +465,7 @@ MINIDUMP_RAW_SYSTEM_INFO = Descriptor([
 ])
 
 MD_CPU_ARCHITECTURE_X86 = 0
+MD_CPU_ARCHITECTURE_ARM = 5
 MD_CPU_ARCHITECTURE_AMD64 = 9
 
 class FuncSymbol:
@@ -481,7 +518,9 @@ class MinidumpReader(object):
         system_info = MINIDUMP_RAW_SYSTEM_INFO.Read(
             self.minidump, d.location.rva)
         self.arch = system_info.processor_architecture
-        assert self.arch in [MD_CPU_ARCHITECTURE_AMD64, MD_CPU_ARCHITECTURE_X86]
+        assert self.arch in [MD_CPU_ARCHITECTURE_AMD64,
+                             MD_CPU_ARCHITECTURE_ARM,
+                             MD_CPU_ARCHITECTURE_X86]
     assert not self.arch is None
 
     for d in directories:
@@ -495,6 +534,9 @@ class MinidumpReader(object):
               self.minidump, self.exception.thread_context.rva)
         elif self.arch == MD_CPU_ARCHITECTURE_AMD64:
           self.exception_context = MINIDUMP_CONTEXT_AMD64.Read(
+              self.minidump, self.exception.thread_context.rva)
+        elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+          self.exception_context = MINIDUMP_CONTEXT_ARM.Read(
               self.minidump, self.exception.thread_context.rva)
         DebugPrint(self.exception_context)
       elif d.stream_type == MD_THREAD_LIST_STREAM:
@@ -541,6 +583,8 @@ class MinidumpReader(object):
   def ReadUIntPtr(self, address):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return self.ReadU64(address)
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return self.ReadU32(address)
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return self.ReadU32(address)
 
@@ -551,6 +595,8 @@ class MinidumpReader(object):
   def _ReadWord(self, location):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return ctypes.c_uint64.from_buffer(self.minidump, location).value
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return ctypes.c_uint32.from_buffer(self.minidump, location).value
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return ctypes.c_uint32.from_buffer(self.minidump, location).value
 
@@ -647,18 +693,29 @@ class MinidumpReader(object):
     return None
 
   def GetDisasmLines(self, address, size):
+    def CountUndefinedInstructions(lines):
+      pattern = "<UNDEFINED>"
+      return sum([line.count(pattern) for (ignore, line) in lines])
+
     location = self.FindLocation(address)
     if location is None: return []
     arch = None
+    possible_objdump_flags = [""]
     if self.arch == MD_CPU_ARCHITECTURE_X86:
       arch = "ia32"
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      arch = "arm"
+      possible_objdump_flags = ["", "--disassembler-options=force-thumb"]
     elif self.arch == MD_CPU_ARCHITECTURE_AMD64:
       arch = "x64"
-    return disasm.GetDisasmLines(self.minidump_name,
-                                 location,
-                                 size,
-                                 arch,
-                                 False)
+    results = [ disasm.GetDisasmLines(self.minidump_name,
+                                     location,
+                                     size,
+                                     arch,
+                                     False,
+                                     objdump_flags)
+                for objdump_flags in possible_objdump_flags ]
+    return min(results, key=CountUndefinedInstructions)
 
 
   def Dispose(self):
@@ -668,24 +725,32 @@ class MinidumpReader(object):
   def ExceptionIP(self):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return self.exception_context.rip
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return self.exception_context.pc
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return self.exception_context.eip
 
   def ExceptionSP(self):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return self.exception_context.rsp
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return self.exception_context.sp
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return self.exception_context.esp
 
   def FormatIntPtr(self, value):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return "%016x" % value
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return "%08x" % value
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return "%08x" % value
 
   def PointerSize(self):
     if self.arch == MD_CPU_ARCHITECTURE_AMD64:
       return 8
+    elif self.arch == MD_CPU_ARCHITECTURE_ARM:
+      return 4
     elif self.arch == MD_CPU_ARCHITECTURE_X86:
       return 4
 
@@ -765,79 +830,82 @@ class MinidumpReader(object):
 # };
 # static P p;
 INSTANCE_TYPES = {
-  64: "SYMBOL_TYPE",
-  68: "ASCII_SYMBOL_TYPE",
-  65: "CONS_SYMBOL_TYPE",
-  69: "CONS_ASCII_SYMBOL_TYPE",
-  66: "EXTERNAL_SYMBOL_TYPE",
-  74: "EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE",
-  70: "EXTERNAL_ASCII_SYMBOL_TYPE",
-  82: "SHORT_EXTERNAL_SYMBOL_TYPE",
-  90: "SHORT_EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE",
-  86: "SHORT_EXTERNAL_ASCII_SYMBOL_TYPE",
   0: "STRING_TYPE",
   4: "ASCII_STRING_TYPE",
   1: "CONS_STRING_TYPE",
   5: "CONS_ASCII_STRING_TYPE",
   3: "SLICED_STRING_TYPE",
   2: "EXTERNAL_STRING_TYPE",
-  10: "EXTERNAL_STRING_WITH_ASCII_DATA_TYPE",
   6: "EXTERNAL_ASCII_STRING_TYPE",
+  10: "EXTERNAL_STRING_WITH_ASCII_DATA_TYPE",
   18: "SHORT_EXTERNAL_STRING_TYPE",
-  26: "SHORT_EXTERNAL_STRING_WITH_ASCII_DATA_TYPE",
   22: "SHORT_EXTERNAL_ASCII_STRING_TYPE",
-  6: "PRIVATE_EXTERNAL_ASCII_STRING_TYPE",
-  128: "MAP_TYPE",
-  129: "CODE_TYPE",
-  130: "ODDBALL_TYPE",
-  131: "JS_GLOBAL_PROPERTY_CELL_TYPE",
-  132: "HEAP_NUMBER_TYPE",
-  133: "FOREIGN_TYPE",
-  134: "BYTE_ARRAY_TYPE",
-  135: "FREE_SPACE_TYPE",
-  136: "EXTERNAL_BYTE_ARRAY_TYPE",
-  137: "EXTERNAL_UNSIGNED_BYTE_ARRAY_TYPE",
-  138: "EXTERNAL_SHORT_ARRAY_TYPE",
-  139: "EXTERNAL_UNSIGNED_SHORT_ARRAY_TYPE",
-  140: "EXTERNAL_INT_ARRAY_TYPE",
-  141: "EXTERNAL_UNSIGNED_INT_ARRAY_TYPE",
-  142: "EXTERNAL_FLOAT_ARRAY_TYPE",
-  144: "EXTERNAL_PIXEL_ARRAY_TYPE",
-  146: "FILLER_TYPE",
-  147: "ACCESSOR_INFO_TYPE",
-  148: "ACCESSOR_PAIR_TYPE",
-  149: "ACCESS_CHECK_INFO_TYPE",
-  150: "INTERCEPTOR_INFO_TYPE",
-  151: "CALL_HANDLER_INFO_TYPE",
-  152: "FUNCTION_TEMPLATE_INFO_TYPE",
-  153: "OBJECT_TEMPLATE_INFO_TYPE",
-  154: "SIGNATURE_INFO_TYPE",
-  155: "TYPE_SWITCH_INFO_TYPE",
-  156: "SCRIPT_TYPE",
-  157: "CODE_CACHE_TYPE",
-  158: "POLYMORPHIC_CODE_CACHE_TYPE",
-  159: "TYPE_FEEDBACK_INFO_TYPE",
-  160: "ALIASED_ARGUMENTS_ENTRY_TYPE",
-  163: "FIXED_ARRAY_TYPE",
-  145: "FIXED_DOUBLE_ARRAY_TYPE",
-  164: "SHARED_FUNCTION_INFO_TYPE",
-  165: "JS_MESSAGE_OBJECT_TYPE",
-  168: "JS_VALUE_TYPE",
-  169: "JS_DATE_TYPE",
-  170: "JS_OBJECT_TYPE",
-  171: "JS_CONTEXT_EXTENSION_OBJECT_TYPE",
-  172: "JS_MODULE_TYPE",
-  173: "JS_GLOBAL_OBJECT_TYPE",
-  174: "JS_BUILTINS_OBJECT_TYPE",
-  175: "JS_GLOBAL_PROXY_TYPE",
-  176: "JS_ARRAY_TYPE",
-  167: "JS_PROXY_TYPE",
-  179: "JS_WEAK_MAP_TYPE",
-  180: "JS_REGEXP_TYPE",
-  181: "JS_FUNCTION_TYPE",
-  166: "JS_FUNCTION_PROXY_TYPE",
-  161: "DEBUG_INFO_TYPE",
-  162: "BREAK_POINT_INFO_TYPE",
+  26: "SHORT_EXTERNAL_STRING_WITH_ASCII_DATA_TYPE",
+  64: "INTERNALIZED_STRING_TYPE",
+  68: "ASCII_INTERNALIZED_STRING_TYPE",
+  65: "CONS_INTERNALIZED_STRING_TYPE",
+  69: "CONS_ASCII_INTERNALIZED_STRING_TYPE",
+  66: "EXTERNAL_INTERNALIZED_STRING_TYPE",
+  70: "EXTERNAL_ASCII_INTERNALIZED_STRING_TYPE",
+  74: "EXTERNAL_INTERNALIZED_STRING_WITH_ASCII_DATA_TYPE",
+  82: "SHORT_EXTERNAL_INTERNALIZED_STRING_TYPE",
+  86: "SHORT_EXTERNAL_ASCII_INTERNALIZED_STRING_TYPE",
+  90: "SHORT_EXTERNAL_INTERNALIZED_STRING_WITH_ASCII_DATA_TYPE",
+  128: "SYMBOL_TYPE",
+  129: "MAP_TYPE",
+  130: "CODE_TYPE",
+  131: "ODDBALL_TYPE",
+  132: "JS_GLOBAL_PROPERTY_CELL_TYPE",
+  133: "HEAP_NUMBER_TYPE",
+  134: "FOREIGN_TYPE",
+  135: "BYTE_ARRAY_TYPE",
+  136: "FREE_SPACE_TYPE",
+  137: "EXTERNAL_BYTE_ARRAY_TYPE",
+  138: "EXTERNAL_UNSIGNED_BYTE_ARRAY_TYPE",
+  139: "EXTERNAL_SHORT_ARRAY_TYPE",
+  140: "EXTERNAL_UNSIGNED_SHORT_ARRAY_TYPE",
+  141: "EXTERNAL_INT_ARRAY_TYPE",
+  142: "EXTERNAL_UNSIGNED_INT_ARRAY_TYPE",
+  143: "EXTERNAL_FLOAT_ARRAY_TYPE",
+  145: "EXTERNAL_PIXEL_ARRAY_TYPE",
+  147: "FILLER_TYPE",
+  148: "DECLARED_ACCESSOR_DESCRIPTOR_TYPE",
+  149: "DECLARED_ACCESSOR_INFO_TYPE",
+  150: "EXECUTABLE_ACCESSOR_INFO_TYPE",
+  151: "ACCESSOR_PAIR_TYPE",
+  152: "ACCESS_CHECK_INFO_TYPE",
+  153: "INTERCEPTOR_INFO_TYPE",
+  154: "CALL_HANDLER_INFO_TYPE",
+  155: "FUNCTION_TEMPLATE_INFO_TYPE",
+  156: "OBJECT_TEMPLATE_INFO_TYPE",
+  157: "SIGNATURE_INFO_TYPE",
+  158: "TYPE_SWITCH_INFO_TYPE",
+  159: "ALLOCATION_SITE_INFO_TYPE",
+  160: "SCRIPT_TYPE",
+  161: "CODE_CACHE_TYPE",
+  162: "POLYMORPHIC_CODE_CACHE_TYPE",
+  163: "TYPE_FEEDBACK_INFO_TYPE",
+  164: "ALIASED_ARGUMENTS_ENTRY_TYPE",
+  167: "FIXED_ARRAY_TYPE",
+  146: "FIXED_DOUBLE_ARRAY_TYPE",
+  168: "SHARED_FUNCTION_INFO_TYPE",
+  169: "JS_MESSAGE_OBJECT_TYPE",
+  172: "JS_VALUE_TYPE",
+  173: "JS_DATE_TYPE",
+  174: "JS_OBJECT_TYPE",
+  175: "JS_CONTEXT_EXTENSION_OBJECT_TYPE",
+  176: "JS_MODULE_TYPE",
+  177: "JS_GLOBAL_OBJECT_TYPE",
+  178: "JS_BUILTINS_OBJECT_TYPE",
+  179: "JS_GLOBAL_PROXY_TYPE",
+  180: "JS_ARRAY_TYPE",
+  171: "JS_PROXY_TYPE",
+  183: "JS_WEAK_MAP_TYPE",
+  184: "JS_REGEXP_TYPE",
+  185: "JS_FUNCTION_TYPE",
+  170: "JS_FUNCTION_PROXY_TYPE",
+  165: "DEBUG_INFO_TYPE",
+  166: "BREAK_POINT_INFO_TYPE",
 }
 
 
@@ -863,80 +931,87 @@ INSTANCE_TYPES = {
 # }
 # printf("}\n");
 KNOWN_MAPS = {
-  0x08081: (134, "ByteArrayMap"),
-  0x080a1: (128, "MetaMap"),
-  0x080c1: (130, "OddballMap"),
-  0x080e1: (163, "FixedArrayMap"),
-  0x08101: (68, "AsciiSymbolMap"),
-  0x08121: (132, "HeapNumberMap"),
-  0x08141: (135, "FreeSpaceMap"),
-  0x08161: (146, "OnePointerFillerMap"),
-  0x08181: (146, "TwoPointerFillerMap"),
-  0x081a1: (131, "GlobalPropertyCellMap"),
-  0x081c1: (164, "SharedFunctionInfoMap"),
-  0x081e1: (4, "AsciiStringMap"),
-  0x08201: (163, "GlobalContextMap"),
-  0x08221: (129, "CodeMap"),
-  0x08241: (163, "ScopeInfoMap"),
-  0x08261: (163, "FixedCOWArrayMap"),
-  0x08281: (145, "FixedDoubleArrayMap"),
-  0x082a1: (163, "HashTableMap"),
-  0x082c1: (0, "StringMap"),
-  0x082e1: (64, "SymbolMap"),
-  0x08301: (1, "ConsStringMap"),
-  0x08321: (5, "ConsAsciiStringMap"),
-  0x08341: (3, "SlicedStringMap"),
-  0x08361: (7, "SlicedAsciiStringMap"),
-  0x08381: (65, "ConsSymbolMap"),
-  0x083a1: (69, "ConsAsciiSymbolMap"),
-  0x083c1: (66, "ExternalSymbolMap"),
-  0x083e1: (74, "ExternalSymbolWithAsciiDataMap"),
-  0x08401: (70, "ExternalAsciiSymbolMap"),
-  0x08421: (2, "ExternalStringMap"),
-  0x08441: (10, "ExternalStringWithAsciiDataMap"),
-  0x08461: (6, "ExternalAsciiStringMap"),
-  0x08481: (82, "ShortExternalSymbolMap"),
-  0x084a1: (90, "ShortExternalSymbolWithAsciiDataMap"),
-  0x084c1: (86, "ShortExternalAsciiSymbolMap"),
-  0x084e1: (18, "ShortExternalStringMap"),
-  0x08501: (26, "ShortExternalStringWithAsciiDataMap"),
-  0x08521: (22, "ShortExternalAsciiStringMap"),
-  0x08541: (0, "UndetectableStringMap"),
-  0x08561: (4, "UndetectableAsciiStringMap"),
-  0x08581: (144, "ExternalPixelArrayMap"),
-  0x085a1: (136, "ExternalByteArrayMap"),
-  0x085c1: (137, "ExternalUnsignedByteArrayMap"),
-  0x085e1: (138, "ExternalShortArrayMap"),
-  0x08601: (139, "ExternalUnsignedShortArrayMap"),
-  0x08621: (140, "ExternalIntArrayMap"),
-  0x08641: (141, "ExternalUnsignedIntArrayMap"),
-  0x08661: (142, "ExternalFloatArrayMap"),
-  0x08681: (143, "ExternalDoubleArrayMap"),
-  0x086a1: (163, "NonStrictArgumentsElementsMap"),
-  0x086c1: (163, "FunctionContextMap"),
-  0x086e1: (163, "CatchContextMap"),
-  0x08701: (163, "WithContextMap"),
-  0x08721: (163, "BlockContextMap"),
-  0x08741: (163, "ModuleContextMap"),
-  0x08761: (165, "JSMessageObjectMap"),
-  0x08781: (133, "ForeignMap"),
-  0x087a1: (170, "NeanderMap"),
-  0x087c1: (158, "PolymorphicCodeCacheMap"),
-  0x087e1: (156, "ScriptMap"),
-  0x08801: (147, "AccessorInfoMap"),
-  0x08821: (148, "AccessorPairMap"),
-  0x08841: (149, "AccessCheckInfoMap"),
-  0x08861: (150, "InterceptorInfoMap"),
-  0x08881: (151, "CallHandlerInfoMap"),
-  0x088a1: (152, "FunctionTemplateInfoMap"),
-  0x088c1: (153, "ObjectTemplateInfoMap"),
-  0x088e1: (154, "SignatureInfoMap"),
-  0x08901: (155, "TypeSwitchInfoMap"),
-  0x08921: (157, "CodeCacheMap"),
-  0x08941: (159, "TypeFeedbackInfoMap"),
-  0x08961: (160, "AliasedArgumentsEntryMap"),
-  0x08981: (161, "DebugInfoMap"),
-  0x089a1: (162, "BreakPointInfoMap"),
+  0x08081: (135, "ByteArrayMap"),
+  0x080a9: (129, "MetaMap"),
+  0x080d1: (131, "OddballMap"),
+  0x080f9: (68, "AsciiInternalizedStringMap"),
+  0x08121: (167, "FixedArrayMap"),
+  0x08149: (133, "HeapNumberMap"),
+  0x08171: (136, "FreeSpaceMap"),
+  0x08199: (147, "OnePointerFillerMap"),
+  0x081c1: (147, "TwoPointerFillerMap"),
+  0x081e9: (132, "GlobalPropertyCellMap"),
+  0x08211: (168, "SharedFunctionInfoMap"),
+  0x08239: (167, "NativeContextMap"),
+  0x08261: (130, "CodeMap"),
+  0x08289: (167, "ScopeInfoMap"),
+  0x082b1: (167, "FixedCOWArrayMap"),
+  0x082d9: (146, "FixedDoubleArrayMap"),
+  0x08301: (167, "HashTableMap"),
+  0x08329: (128, "SymbolMap"),
+  0x08351: (0, "StringMap"),
+  0x08379: (4, "AsciiStringMap"),
+  0x083a1: (1, "ConsStringMap"),
+  0x083c9: (5, "ConsAsciiStringMap"),
+  0x083f1: (3, "SlicedStringMap"),
+  0x08419: (7, "SlicedAsciiStringMap"),
+  0x08441: (2, "ExternalStringMap"),
+  0x08469: (10, "ExternalStringWithAsciiDataMap"),
+  0x08491: (6, "ExternalAsciiStringMap"),
+  0x084b9: (18, "ShortExternalStringMap"),
+  0x084e1: (26, "ShortExternalStringWithAsciiDataMap"),
+  0x08509: (64, "InternalizedStringMap"),
+  0x08531: (65, "ConsInternalizedStringMap"),
+  0x08559: (69, "ConsAsciiInternalizedStringMap"),
+  0x08581: (66, "ExternalInternalizedStringMap"),
+  0x085a9: (74, "ExternalInternalizedStringWithAsciiDataMap"),
+  0x085d1: (70, "ExternalAsciiInternalizedStringMap"),
+  0x085f9: (82, "ShortExternalInternalizedStringMap"),
+  0x08621: (90, "ShortExternalInternalizedStringWithAsciiDataMap"),
+  0x08649: (86, "ShortExternalAsciiInternalizedStringMap"),
+  0x08671: (22, "ShortExternalAsciiStringMap"),
+  0x08699: (0, "UndetectableStringMap"),
+  0x086c1: (4, "UndetectableAsciiStringMap"),
+  0x086e9: (145, "ExternalPixelArrayMap"),
+  0x08711: (137, "ExternalByteArrayMap"),
+  0x08739: (138, "ExternalUnsignedByteArrayMap"),
+  0x08761: (139, "ExternalShortArrayMap"),
+  0x08789: (140, "ExternalUnsignedShortArrayMap"),
+  0x087b1: (141, "ExternalIntArrayMap"),
+  0x087d9: (142, "ExternalUnsignedIntArrayMap"),
+  0x08801: (143, "ExternalFloatArrayMap"),
+  0x08829: (144, "ExternalDoubleArrayMap"),
+  0x08851: (167, "NonStrictArgumentsElementsMap"),
+  0x08879: (167, "FunctionContextMap"),
+  0x088a1: (167, "CatchContextMap"),
+  0x088c9: (167, "WithContextMap"),
+  0x088f1: (167, "BlockContextMap"),
+  0x08919: (167, "ModuleContextMap"),
+  0x08941: (167, "GlobalContextMap"),
+  0x08969: (169, "JSMessageObjectMap"),
+  0x08991: (134, "ForeignMap"),
+  0x089b9: (174, "NeanderMap"),
+  0x089e1: (159, "AllocationSiteInfoMap"),
+  0x08a09: (162, "PolymorphicCodeCacheMap"),
+  0x08a31: (160, "ScriptMap"),
+  0x08a59: (174, ""),
+  0x08a81: (174, "ExternalMap"),
+  0x08aa9: (148, "DeclaredAccessorDescriptorMap"),
+  0x08ad1: (149, "DeclaredAccessorInfoMap"),
+  0x08af9: (150, "ExecutableAccessorInfoMap"),
+  0x08b21: (151, "AccessorPairMap"),
+  0x08b49: (152, "AccessCheckInfoMap"),
+  0x08b71: (153, "InterceptorInfoMap"),
+  0x08b99: (154, "CallHandlerInfoMap"),
+  0x08bc1: (155, "FunctionTemplateInfoMap"),
+  0x08be9: (156, "ObjectTemplateInfoMap"),
+  0x08c11: (157, "SignatureInfoMap"),
+  0x08c39: (158, "TypeSwitchInfoMap"),
+  0x08c61: (161, "CodeCacheMap"),
+  0x08c89: (163, "TypeFeedbackInfoMap"),
+  0x08cb1: (164, "AliasedArgumentsEntryMap"),
+  0x08cd9: (165, "DebugInfoMap"),
+  0x08d01: (166, "BreakPointInfoMap"),
 }
 
 
@@ -947,7 +1022,7 @@ KNOWN_MAPS = {
 #
 # #define ROOT_LIST_CASE(type, name, camel_name) \
 #   if (o == heap_.name()) n = #camel_name;
-# OldSpaces spit;
+# OldSpaces spit(heap());
 # printf("KNOWN_OBJECTS = {\n");
 # for (PagedSpace* s = spit.next(); s != NULL; s = spit.next()) {
 #   HeapObjectIterator it(s);
@@ -973,25 +1048,27 @@ KNOWN_OBJECTS = {
   ("OLD_POINTER_SPACE", 0x080f1): "NumberStringCache",
   ("OLD_POINTER_SPACE", 0x088f9): "SingleCharacterStringCache",
   ("OLD_POINTER_SPACE", 0x08b01): "StringSplitCache",
-  ("OLD_POINTER_SPACE", 0x08f09): "TerminationException",
-  ("OLD_POINTER_SPACE", 0x08f19): "MessageListeners",
-  ("OLD_POINTER_SPACE", 0x08f35): "CodeStubs",
-  ("OLD_POINTER_SPACE", 0x09b61): "NonMonomorphicCache",
-  ("OLD_POINTER_SPACE", 0x0a175): "PolymorphicCodeCache",
-  ("OLD_POINTER_SPACE", 0x0a17d): "NativesSourceCache",
-  ("OLD_POINTER_SPACE", 0x0a1bd): "EmptyScript",
-  ("OLD_POINTER_SPACE", 0x0a1f9): "IntrinsicFunctionNames",
-  ("OLD_POINTER_SPACE", 0x24a49): "SymbolTable",
-  ("OLD_DATA_SPACE", 0x08081): "EmptyFixedArray",
-  ("OLD_DATA_SPACE", 0x080a1): "NanValue",
-  ("OLD_DATA_SPACE", 0x0811d): "EmptyByteArray",
-  ("OLD_DATA_SPACE", 0x08125): "EmptyString",
-  ("OLD_DATA_SPACE", 0x08131): "EmptyDescriptorArray",
+  ("OLD_POINTER_SPACE", 0x08f09): "RegExpMultipleCache",
+  ("OLD_POINTER_SPACE", 0x09311): "TerminationException",
+  ("OLD_POINTER_SPACE", 0x09321): "MessageListeners",
+  ("OLD_POINTER_SPACE", 0x0933d): "CodeStubs",
+  ("OLD_POINTER_SPACE", 0x09fa5): "NonMonomorphicCache",
+  ("OLD_POINTER_SPACE", 0x0a5b9): "PolymorphicCodeCache",
+  ("OLD_POINTER_SPACE", 0x0a5c1): "NativesSourceCache",
+  ("OLD_POINTER_SPACE", 0x0a601): "EmptyScript",
+  ("OLD_POINTER_SPACE", 0x0a63d): "IntrinsicFunctionNames",
+  ("OLD_POINTER_SPACE", 0x0d659): "ObservationState",
+  ("OLD_POINTER_SPACE", 0x27415): "SymbolTable",
+  ("OLD_DATA_SPACE", 0x08099): "EmptyDescriptorArray",
+  ("OLD_DATA_SPACE", 0x080a1): "EmptyFixedArray",
+  ("OLD_DATA_SPACE", 0x080a9): "NanValue",
+  ("OLD_DATA_SPACE", 0x08125): "EmptyByteArray",
+  ("OLD_DATA_SPACE", 0x0812d): "EmptyString",
   ("OLD_DATA_SPACE", 0x08259): "InfinityValue",
   ("OLD_DATA_SPACE", 0x08265): "MinusZeroValue",
   ("OLD_DATA_SPACE", 0x08271): "PrototypeAccessors",
-  ("CODE_SPACE", 0x12b81): "JsEntryCode",
-  ("CODE_SPACE", 0x12c61): "JsConstructEntryCode",
+  ("CODE_SPACE", 0x0aea1): "JsEntryCode",
+  ("CODE_SPACE", 0x0b5c1): "JsConstructEntryCode",
 }
 
 
@@ -1069,8 +1146,104 @@ class HeapObject(object):
 
 
 class Map(HeapObject):
+  def Decode(self, offset, size, value):
+    return (value >> offset) & ((1 << size) - 1)
+
+  # Instance Sizes
+  def InstanceSizesOffset(self):
+    return self.heap.PointerSize()
+
+  def InstanceSizeOffset(self):
+    return self.InstanceSizesOffset()
+
+  def InObjectProperties(self):
+    return self.InstanceSizeOffset() + 1
+
+  def PreAllocatedPropertyFields(self):
+    return self.InObjectProperties() + 1
+
+  def VisitorId(self):
+    return self.PreAllocatedPropertyFields() + 1
+
+  # Instance Attributes
+  def InstanceAttributesOffset(self):
+    return self.InstanceSizesOffset() + self.heap.IntSize()
+
   def InstanceTypeOffset(self):
-    return self.heap.PointerSize() + self.heap.IntSize()
+    return self.InstanceAttributesOffset()
+
+  def UnusedPropertyFieldsOffset(self):
+    return self.InstanceTypeOffset() + 1
+
+  def BitFieldOffset(self):
+    return self.UnusedPropertyFieldsOffset() + 1
+
+  def BitField2Offset(self):
+    return self.BitFieldOffset() + 1
+
+  # Other fields
+  def PrototypeOffset(self):
+    return self.InstanceAttributesOffset() + self.heap.IntSize()
+
+  def ConstructorOffset(self):
+    return self.PrototypeOffset() + self.heap.PointerSize()
+
+  def TransitionsOrBackPointerOffset(self):
+    return self.ConstructorOffset() + self.heap.PointerSize()
+
+  def DescriptorsOffset(self):
+    return self.TransitionsOrBackPointerOffset() + self.heap.PointerSize()
+
+  def CodeCacheOffset(self):
+    return self.DescriptorsOffset() + self.heap.PointerSize()
+
+  def DependentCodeOffset(self):
+    return self.CodeCacheOffset() + self.heap.PointerSize()
+
+  def BitField3Offset(self):
+    return self.DependentCodeOffset() + self.heap.PointerSize()
+
+  def ReadByte(self, offset):
+    return self.heap.reader.ReadU8(self.address + offset)
+
+  def Print(self, p):
+    p.Print("Map(%08x)" % (self.address))
+    p.Print("- size: %d, inobject: %d, preallocated: %d, visitor: %d" % (
+        self.ReadByte(self.InstanceSizeOffset()),
+        self.ReadByte(self.InObjectProperties()),
+        self.ReadByte(self.PreAllocatedPropertyFields()),
+        self.VisitorId()))
+
+    bitfield = self.ReadByte(self.BitFieldOffset())
+    bitfield2 = self.ReadByte(self.BitField2Offset())
+    p.Print("- %s, unused: %d, bf: %d, bf2: %d" % (
+        INSTANCE_TYPES[self.ReadByte(self.InstanceTypeOffset())],
+        self.ReadByte(self.UnusedPropertyFieldsOffset()),
+        bitfield, bitfield2))
+
+    p.Print("- kind: %s" % (self.Decode(3, 5, bitfield2)))
+
+    bitfield3 = self.ObjectField(self.BitField3Offset())
+    p.Print(
+        "- EnumLength: %d NumberOfOwnDescriptors: %d OwnsDescriptors: %s" % (
+            self.Decode(0, 11, bitfield3),
+            self.Decode(11, 11, bitfield3),
+            self.Decode(25, 1, bitfield3)))
+    p.Print("- IsShared: %s" % (self.Decode(22, 1, bitfield3)))
+    p.Print("- FunctionWithPrototype: %s" % (self.Decode(23, 1, bitfield3)))
+    p.Print("- DictionaryMap: %s" % (self.Decode(24, 1, bitfield3)))
+
+    descriptors = self.ObjectField(self.DescriptorsOffset())
+    if descriptors.__class__ == FixedArray:
+      DescriptorArray(descriptors).Print(p)
+    else:
+      p.Print("Descriptors: %s" % (descriptors))
+
+    transitions = self.ObjectField(self.TransitionsOrBackPointerOffset())
+    if transitions.__class__ == FixedArray:
+      TransitionArray(transitions).Print(p)
+    else:
+      p.Print("TransitionsOrBackPointer: %s" % (transitions))
 
   def __init__(self, heap, map, address):
     HeapObject.__init__(self, heap, map, address)
@@ -1204,6 +1377,12 @@ class FixedArray(HeapObject):
   def ElementsOffset(self):
     return self.heap.PointerSize() * 2
 
+  def MemberOffset(self, i):
+    return self.ElementsOffset() + self.heap.PointerSize() * i
+
+  def Get(self, i):
+    return self.ObjectField(self.MemberOffset(i))
+
   def __init__(self, heap, map, address):
     HeapObject.__init__(self, heap, map, address)
     self.length = self.SmiField(self.LengthOffset())
@@ -1227,6 +1406,111 @@ class FixedArray(HeapObject):
 
   def __str__(self):
     return "FixedArray(%08x, length=%d)" % (self.address, self.length)
+
+
+class DescriptorArray(object):
+  def __init__(self, array):
+    self.array = array
+
+  def Length(self):
+    return self.array.Get(0)
+
+  def Decode(self, offset, size, value):
+    return (value >> offset) & ((1 << size) - 1)
+
+  TYPES = [
+      "normal",
+      "field",
+      "function",
+      "callbacks"
+  ]
+
+  def Type(self, value):
+    return DescriptorArray.TYPES[self.Decode(0, 3, value)]
+
+  def Attributes(self, value):
+    attributes = self.Decode(3, 3, value)
+    result = []
+    if (attributes & 0): result += ["ReadOnly"]
+    if (attributes & 1): result += ["DontEnum"]
+    if (attributes & 2): result += ["DontDelete"]
+    return "[" + (",".join(result)) + "]"
+
+  def Deleted(self, value):
+    return self.Decode(6, 1, value) == 1
+
+  def Storage(self, value):
+    return self.Decode(7, 11, value)
+
+  def Pointer(self, value):
+    return self.Decode(18, 11, value)
+
+  def Details(self, di, value):
+    return (
+        di,
+        self.Type(value),
+        self.Attributes(value),
+        self.Storage(value),
+        self.Pointer(value)
+    )
+
+
+  def Print(self, p):
+    length = self.Length()
+    array = self.array
+
+    p.Print("Descriptors(%08x, length=%d)" % (array.address, length))
+    p.Print("[et] %s" % (array.Get(1)))
+
+    for di in xrange(length):
+      i = 2 + di * 3
+      p.Print("0x%x" % (array.address + array.MemberOffset(i)))
+      p.Print("[%i] name:    %s" % (di, array.Get(i + 0)))
+      p.Print("[%i] details: %s %s enum %i pointer %i" % \
+              self.Details(di, array.Get(i + 1)))
+      p.Print("[%i] value:   %s" % (di, array.Get(i + 2)))
+
+    end = self.array.length // 3
+    if length != end:
+      p.Print("[%i-%i] slack descriptors" % (length, end))
+
+
+class TransitionArray(object):
+  def __init__(self, array):
+    self.array = array
+
+  def IsSimpleTransition(self):
+    return self.array.length <= 2
+
+  def Length(self):
+    # SimpleTransition cases
+    if self.IsSimpleTransition():
+      return self.array.length - 1
+    return (self.array.length - 3) // 2
+
+  def Print(self, p):
+    length = self.Length()
+    array = self.array
+
+    p.Print("Transitions(%08x, length=%d)" % (array.address, length))
+    p.Print("[backpointer] %s" % (array.Get(0)))
+    if self.IsSimpleTransition():
+      if length == 1:
+        p.Print("[simple target] %s" % (array.Get(1)))
+      return
+
+    elements = array.Get(1)
+    if elements is not None:
+      p.Print("[elements   ] %s" % (elements))
+
+    prototype = array.Get(2)
+    if prototype is not None:
+      p.Print("[prototype  ] %s" % (prototype))
+
+    for di in xrange(length):
+      i = 3 + di * 2
+      p.Print("[%i] symbol: %s" % (di, array.Get(i + 0)))
+      p.Print("[%i] target: %s" % (di, array.Get(i + 1)))
 
 
 class JSFunction(HeapObject):
@@ -1459,6 +1743,8 @@ class V8Heap(object):
   def MapAlignmentMask(self):
     if self.reader.arch == MD_CPU_ARCHITECTURE_AMD64:
       return (1 << 4) - 1
+    elif self.reader.arch == MD_CPU_ARCHITECTURE_ARM:
+      return (1 << 4) - 1
     elif self.reader.arch == MD_CPU_ARCHITECTURE_X86:
       return (1 << 5) - 1
 
@@ -1642,6 +1928,30 @@ class InspectionShell(cmd.Cmd):
     else:
       print "Address cannot be interpreted as object!"
 
+  def do_do_desc(self, address):
+    """
+      Print a descriptor array in a readable format.
+    """
+    start = int(address, 16)
+    if ((start & 1) == 1): start = start - 1
+    DescriptorArray(FixedArray(self.heap, None, start)).Print(Printer())
+
+  def do_do_map(self, address):
+    """
+      Print a descriptor array in a readable format.
+    """
+    start = int(address, 16)
+    if ((start & 1) == 1): start = start - 1
+    Map(self.heap, None, start).Print(Printer())
+
+  def do_do_trans(self, address):
+    """
+      Print a transition array in a readable format.
+    """
+    start = int(address, 16)
+    if ((start & 1) == 1): start = start - 1
+    TransitionArray(FixedArray(self.heap, None, start)).Print(Printer())
+
   def do_dp(self, address):
     """
      Interpret memory at the given address as being on a V8 heap page
@@ -1726,16 +2036,23 @@ class InspectionShell(cmd.Cmd):
 
   def do_u(self, args):
     """
-     u 0x<address> 0x<size>
-     Unassemble memory in the region [address, address + size)
+     Unassemble memory in the region [address, address + size). If the
+     size is not specified, a default value of 32 bytes is used.
+     Synopsis: u 0x<address> 0x<size>
     """
     args = args.split(' ')
     start = int(args[0], 16)
-    size = int(args[1], 16)
+    size = int(args[1], 16) if len(args) > 1 else 0x20
+    if not self.reader.IsValidAddress(start):
+      print "Address is not contained within the minidump!"
+      return
     lines = self.reader.GetDisasmLines(start, size)
     for line in lines:
       print FormatDisasmLine(start, self.heap, line)
     print
+
+  def do_EOF(self, none):
+    raise KeyboardInterrupt
 
 EIP_PROXIMITY = 64
 
@@ -1743,6 +2060,9 @@ CONTEXT_FOR_ARCH = {
     MD_CPU_ARCHITECTURE_AMD64:
       ['rax', 'rbx', 'rcx', 'rdx', 'rdi', 'rsi', 'rbp', 'rsp', 'rip',
        'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'],
+    MD_CPU_ARCHITECTURE_ARM:
+      ['r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9',
+       'r10', 'r11', 'r12', 'sp', 'lr', 'pc'],
     MD_CPU_ARCHITECTURE_X86:
       ['eax', 'ebx', 'ecx', 'edx', 'edi', 'esi', 'ebp', 'esp', 'eip']
 }
@@ -1768,14 +2088,19 @@ def AnalyzeMinidump(options, minidump_name):
     for r in CONTEXT_FOR_ARCH[reader.arch]:
       print "    %s: %s" % (r, reader.FormatIntPtr(reader.Register(r)))
     # TODO(vitalyr): decode eflags.
-    print "    eflags: %s" % bin(reader.exception_context.eflags)[2:]
-    print
-    print "  modules:"
-    for module in reader.module_list.modules:
-      name = GetModuleName(reader, module)
-      if name in KNOWN_MODULES:
-        print "    %s at %08X" % (name, module.base_of_image)
-        reader.TryLoadSymbolsFor(name, module)
+    if reader.arch == MD_CPU_ARCHITECTURE_ARM:
+      print "    cpsr: %s" % bin(reader.exception_context.cpsr)[2:]
+    else:
+      print "    eflags: %s" % bin(reader.exception_context.eflags)[2:]
+
+    # TODO(mstarzinger): Disabled because broken, needs investigation.
+    #print
+    #print "  modules:"
+    #for module in reader.module_list.modules:
+    #  name = GetModuleName(reader, module)
+    #  if name in KNOWN_MODULES:
+    #    print "    %s at %08X" % (name, module.base_of_image)
+    #    reader.TryLoadSymbolsFor(name, module)
     print
 
     stack_top = reader.ExceptionSP()
@@ -1813,7 +2138,10 @@ def AnalyzeMinidump(options, minidump_name):
     FullDump(reader, heap)
 
   if options.shell:
-    InspectionShell(reader, heap).cmdloop("type help to get help")
+    try:
+      InspectionShell(reader, heap).cmdloop("type help to get help")
+    except KeyboardInterrupt:
+      print "Kthxbye."
   else:
     if reader.exception is not None:
       print "Annotated stack (from exception.esp to bottom):"
@@ -1839,7 +2167,15 @@ if __name__ == "__main__":
                     help="dump all information contained in the minidump")
   parser.add_option("--symdir", dest="symdir", default=".",
                     help="directory containing *.pdb.sym file with symbols")
+  parser.add_option("--objdump",
+                    default="/usr/bin/objdump",
+                    help="objdump tool to use [default: %default]")
   options, args = parser.parse_args()
+  if os.path.exists(options.objdump):
+    disasm.OBJDUMP_BIN = options.objdump
+    OBJDUMP_BIN = options.objdump
+  else:
+    print "Cannot find %s, falling back to default objdump" % options.objdump
   if len(args) != 1:
     parser.print_help()
     sys.exit(1)

@@ -40,10 +40,11 @@ namespace internal {
 
 Address IC::address() const {
   // Get the address of the call.
-  Address result = pc() - Assembler::kCallTargetAddressOffset;
+  Address result = Assembler::target_address_from_return_address(pc());
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
-  Debug* debug = Isolate::Current()->debug();
+  ASSERT(Isolate::Current() == isolate());
+  Debug* debug = isolate()->debug();
   // First check if any break points are active if not just return the address
   // of the call.
   if (!debug->has_break_points()) return result;
@@ -91,12 +92,8 @@ void IC::SetTargetAtAddress(Address address, Code* target) {
   }
 #endif
   Assembler::set_target_address_at(address, target->instruction_start());
-  if (heap->gc_state() == Heap::MARK_COMPACT &&
-      heap->mark_compact_collector()->is_compacting()) {
-    Code* host = heap->isolate()->inner_pointer_to_code_cache()->
-        GcSafeFindCodeForInnerPointer(address);
-    RelocInfo rinfo(address, RelocInfo::CODE_TARGET, 0, host);
-    heap->mark_compact_collector()->RecordRelocSlot(&rinfo, target);
+  if (heap->gc_state() == Heap::MARK_COMPACT) {
+    heap->mark_compact_collector()->RecordCodeTargetPatch(address, target);
   } else {
     heap->incremental_marking()->RecordCodeTargetPatch(address, target);
   }
@@ -110,7 +107,8 @@ InlineCacheHolderFlag IC::GetCodeCacheForObject(Object* object,
     return GetCodeCacheForObject(JSObject::cast(object), holder);
   }
   // If the object is a value, we use the prototype map for the cache.
-  ASSERT(object->IsString() || object->IsNumber() || object->IsBoolean());
+  ASSERT(object->IsString() || object->IsSymbol() ||
+         object->IsNumber() || object->IsBoolean());
   return PROTOTYPE_MAP;
 }
 
@@ -132,8 +130,11 @@ InlineCacheHolderFlag IC::GetCodeCacheForObject(JSObject* object,
 }
 
 
-JSObject* IC::GetCodeCacheHolder(Object* object, InlineCacheHolderFlag holder) {
-  Object* map_owner = (holder == OWN_MAP ? object : object->GetPrototype());
+JSObject* IC::GetCodeCacheHolder(Isolate* isolate,
+                                 Object* object,
+                                 InlineCacheHolderFlag holder) {
+  Object* map_owner =
+      holder == OWN_MAP ? object : object->GetPrototype(isolate);
   ASSERT(map_owner->IsJSObject());
   return JSObject::cast(map_owner);
 }

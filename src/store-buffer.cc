@@ -25,9 +25,11 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "v8.h"
-
 #include "store-buffer.h"
+
+#include <algorithm>
+
+#include "v8.h"
 #include "store-buffer-inl.h"
 #include "v8-counters.h"
 
@@ -120,33 +122,6 @@ void StoreBuffer::TearDown() {
 void StoreBuffer::StoreBufferOverflow(Isolate* isolate) {
   isolate->heap()->store_buffer()->Compact();
 }
-
-
-#if V8_TARGET_ARCH_X64
-static int CompareAddresses(const void* void_a, const void* void_b) {
-  intptr_t a =
-      reinterpret_cast<intptr_t>(*reinterpret_cast<const Address*>(void_a));
-  intptr_t b =
-      reinterpret_cast<intptr_t>(*reinterpret_cast<const Address*>(void_b));
-  // Unfortunately if int is smaller than intptr_t there is no branch-free
-  // way to return a number with the same sign as the difference between the
-  // pointers.
-  if (a == b) return 0;
-  if (a < b) return -1;
-  ASSERT(a > b);
-  return 1;
-}
-#else
-static int CompareAddresses(const void* void_a, const void* void_b) {
-  intptr_t a =
-      reinterpret_cast<intptr_t>(*reinterpret_cast<const Address*>(void_a));
-  intptr_t b =
-      reinterpret_cast<intptr_t>(*reinterpret_cast<const Address*>(void_b));
-  ASSERT(sizeof(1) == sizeof(a));
-  // Shift down to avoid wraparound.
-  return (a >> kPointerSizeLog2) - (b >> kPointerSizeLog2);
-}
-#endif
 
 
 void StoreBuffer::Uniq() {
@@ -283,10 +258,7 @@ void StoreBuffer::Filter(int flag) {
 void StoreBuffer::SortUniq() {
   Compact();
   if (old_buffer_is_sorted_) return;
-  qsort(reinterpret_cast<void*>(old_start_),
-        old_top_ - old_start_,
-        sizeof(*old_top_),
-        &CompareAddresses);
+  std::sort(old_start_, old_top_);
   Uniq();
 
   old_buffer_is_sorted_ = true;
@@ -372,7 +344,7 @@ void StoreBuffer::GCPrologue() {
 }
 
 
-#ifdef DEBUG
+#ifdef VERIFY_HEAP
 static void DummyScavengePointer(HeapObject** p, HeapObject* o) {
   // Do nothing.
 }
@@ -415,7 +387,7 @@ void StoreBuffer::VerifyPointers(LargeObjectSpace* space) {
 
 
 void StoreBuffer::Verify() {
-#ifdef DEBUG
+#ifdef VERIFY_HEAP
   VerifyPointers(heap_->old_pointer_space(),
                  &StoreBuffer::FindPointersToNewSpaceInRegion);
   VerifyPointers(heap_->map_space(),
@@ -427,9 +399,11 @@ void StoreBuffer::Verify() {
 
 void StoreBuffer::GCEpilogue() {
   during_gc_ = false;
+#ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
     Verify();
   }
+#endif
 }
 
 
@@ -685,10 +659,15 @@ void StoreBuffer::Compact() {
     uintptr_t int_addr = reinterpret_cast<uintptr_t>(*current);
     // Shift out the last bits including any tags.
     int_addr >>= kPointerSizeLog2;
-    int hash1 =
-        ((int_addr ^ (int_addr >> kHashSetLengthLog2)) & (kHashSetLength - 1));
+    // The upper part of an address is basically random because of ASLR and OS
+    // non-determinism, so we use only the bits within a page for hashing to
+    // make v8's behavior (more) deterministic.
+    uintptr_t hash_addr =
+        int_addr & (Page::kPageAlignmentMask >> kPointerSizeLog2);
+    int hash1 = ((hash_addr ^ (hash_addr >> kHashSetLengthLog2)) &
+                 (kHashSetLength - 1));
     if (hash_set_1_[hash1] == int_addr) continue;
-    uintptr_t hash2 = (int_addr - (int_addr >> kHashSetLengthLog2));
+    uintptr_t hash2 = (hash_addr - (hash_addr >> kHashSetLengthLog2));
     hash2 ^= hash2 >> (kHashSetLengthLog2 * 2);
     hash2 &= (kHashSetLength - 1);
     if (hash_set_2_[hash2] == int_addr) continue;

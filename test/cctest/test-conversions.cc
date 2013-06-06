@@ -1,4 +1,29 @@
 // Copyright 2011 the V8 project authors. All rights reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above
+//       copyright notice, this list of conditions and the following
+//       disclaimer in the documentation and/or other materials provided
+//       with the distribution.
+//     * Neither the name of Google Inc. nor the names of its
+//       contributors may be used to endorse or promote products derived
+//       from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <stdlib.h>
 
@@ -56,10 +81,10 @@ TEST(MalformedOctal) {
   CHECK_EQ(81.0, StringToDouble(&uc, "081", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(78.0, StringToDouble(&uc, "078", ALLOW_HEX | ALLOW_OCTALS));
 
-  CHECK(isnan(StringToDouble(&uc, "07.7", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07.8", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07e8", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07e7", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07.7", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07.8", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07e8", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07e7", ALLOW_HEX | ALLOW_OCTALS)));
 
   CHECK_EQ(8.7, StringToDouble(&uc, "08.7", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(8e7, StringToDouble(&uc, "08e7", ALLOW_HEX | ALLOW_OCTALS));
@@ -98,9 +123,9 @@ TEST(TrailingJunk) {
 
 TEST(NonStrDecimalLiteral) {
   UnicodeCache uc;
-  CHECK(isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
-  CHECK(isnan(StringToDouble(&uc, "", NO_FLAGS, OS::nan_value())));
-  CHECK(isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, "", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
   CHECK_EQ(0.0, StringToDouble(&uc, "", NO_FLAGS));
   CHECK_EQ(0.0, StringToDouble(&uc, " ", NO_FLAGS));
 }
@@ -115,8 +140,8 @@ TEST(IntegerStrLiteral) {
   CHECK_EQ(-1.0, StringToDouble(&uc, "-1", NO_FLAGS));
   CHECK_EQ(-1.0, StringToDouble(&uc, "  -1  ", NO_FLAGS));
   CHECK_EQ(1.0, StringToDouble(&uc, "  +1  ", NO_FLAGS));
-  CHECK(isnan(StringToDouble(&uc, "  -  1  ", NO_FLAGS)));
-  CHECK(isnan(StringToDouble(&uc, "  +  1  ", NO_FLAGS)));
+  CHECK(std::isnan(StringToDouble(&uc, "  -  1  ", NO_FLAGS)));
+  CHECK(std::isnan(StringToDouble(&uc, "  +  1  ", NO_FLAGS)));
 
   CHECK_EQ(0.0, StringToDouble(&uc, "0e0", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(0.0, StringToDouble(&uc, "0e1", ALLOW_HEX | ALLOW_OCTALS));
@@ -224,6 +249,7 @@ TEST(ExponentNumberStr) {
   CHECK_EQ(1e-106, StringToDouble(&uc, ".000001e-100", NO_FLAGS));
 }
 
+
 class OneBit1: public BitField<uint32_t, 0, 1> {};
 class OneBit2: public BitField<uint32_t, 7, 1> {};
 class EightBit1: public BitField<uint32_t, 0, 8> {};
@@ -260,4 +286,22 @@ TEST(BitField) {
   }
   CHECK(!EightBit1::is_valid(256));
   CHECK(!EightBit2::is_valid(256));
+}
+
+
+class UpperBits: public BitField64<int, 61, 3> {};
+class MiddleBits: public BitField64<int, 31, 2> {};
+
+TEST(BitField64) {
+  uint64_t x;
+
+  // Test most significant bits.
+  x = V8_2PART_UINT64_C(0xE0000000, 00000000);
+  CHECK(x == UpperBits::encode(7));
+  CHECK_EQ(7, UpperBits::decode(x));
+
+  // Test the 32/64-bit boundary bits.
+  x = V8_2PART_UINT64_C(0x00000001, 80000000);
+  CHECK(x == MiddleBits::encode(3));
+  CHECK_EQ(3, MiddleBits::decode(x));
 }

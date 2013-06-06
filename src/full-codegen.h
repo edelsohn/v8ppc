@@ -35,6 +35,7 @@
 #include "code-stubs.h"
 #include "codegen.h"
 #include "compiler.h"
+#include "data-flow.h"
 
 namespace v8 {
 namespace internal {
@@ -48,7 +49,9 @@ class JumpPatchSite;
 // debugger to piggybag on.
 class BreakableStatementChecker: public AstVisitor {
  public:
-  BreakableStatementChecker() : is_breakable_(false) {}
+  BreakableStatementChecker() : is_breakable_(false) {
+    InitializeAstVisitor();
+  }
 
   void Check(Statement* stmt);
   void Check(Expression* stmt);
@@ -63,6 +66,7 @@ class BreakableStatementChecker: public AstVisitor {
 
   bool is_breakable_;
 
+  DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
   DISALLOW_COPY_AND_ASSIGN(BreakableStatementChecker);
 };
 
@@ -88,7 +92,7 @@ class FullCodeGenerator: public AstVisitor {
         bailout_entries_(info->HasDeoptimizationSupport()
                          ? info->function()->ast_node_count() : 0,
                          info->zone()),
-        stack_checks_(2, info->zone()),  // There's always at least one.
+        back_edges_(2, info->zone()),
         type_feedback_cells_(info->HasDeoptimizationSupport()
                              ? info->function()->ast_node_count() : 0,
                              info->zone()),
@@ -133,6 +137,7 @@ class FullCodeGenerator: public AstVisitor {
 #error Unsupported target architecture.
 #endif
 
+  static const int kBackEdgeEntrySize = 2 * kIntSize + kOneByteSize;
 
  private:
   class Breakable;
@@ -398,8 +403,19 @@ class FullCodeGenerator: public AstVisitor {
   void VisitInDuplicateContext(Expression* expr);
 
   void VisitDeclarations(ZoneList<Declaration*>* declarations);
+  void DeclareModules(Handle<FixedArray> descriptions);
   void DeclareGlobals(Handle<FixedArray> pairs);
   int DeclareGlobalsFlags();
+
+  // Generate code to allocate all (including nested) modules and contexts.
+  // Because of recursive linking and the presence of module alias declarations,
+  // this has to be a separate pass _before_ populating or executing any module.
+  void AllocateModules(ZoneList<Declaration*>* declarations);
+
+  // Generator code to return a fresh iterator result object.  The "value"
+  // property is set to a value popped from the stack, and "done" is set
+  // according to the argument.
+  void EmitReturnIteratorResult(bool done);
 
   // Try to perform a comparison as a fast inlined literal compare if
   // the operands allow it.  Returns true if the compare operations
@@ -444,17 +460,16 @@ class FullCodeGenerator: public AstVisitor {
   // neither a with nor a catch context.
   void EmitDebugCheckDeclarationContext(Variable* variable);
 
-  // Platform-specific code for checking the stack limit at the back edge of
-  // a loop.
   // This is meant to be called at loop back edges, |back_edge_target| is
   // the jump target of the back edge and is used to approximate the amount
   // of code inside the loop.
-  void EmitStackCheck(IterationStatement* stmt, Label* back_edge_target);
-  // Record the OSR AST id corresponding to a stack check in the code.
-  void RecordStackCheck(BailoutId osr_ast_id);
-  // Emit a table of stack check ids and pcs into the code stream.  Return
-  // the offset of the start of the table.
-  unsigned EmitStackCheckTable();
+  void EmitBackEdgeBookkeeping(IterationStatement* stmt,
+                               Label* back_edge_target);
+  // Record the OSR AST id corresponding to a back edge in the code.
+  void RecordBackEdge(BailoutId osr_ast_id);
+  // Emit a table of back edge ids, pcs and loop depths into the code stream.
+  // Return the offset of the start of the table.
+  unsigned EmitBackEdgeTable();
 
   void EmitProfilingCounterDecrement(int delta);
   void EmitProfilingCounterReset();
@@ -477,6 +492,16 @@ class FullCodeGenerator: public AstVisitor {
   INLINE_FUNCTION_LIST(EMIT_INLINE_RUNTIME_CALL)
   INLINE_RUNTIME_FUNCTION_LIST(EMIT_INLINE_RUNTIME_CALL)
 #undef EMIT_INLINE_RUNTIME_CALL
+
+  void EmitSeqStringSetCharCheck(Register string,
+                                 Register index,
+                                 Register value,
+                                 uint32_t encoding_mask);
+
+  // Platform-specific code for resuming generators.
+  void EmitGeneratorResume(Expression *generator,
+                           Expression *value,
+                           JSGeneratorObject::ResumeMode resume_mode);
 
   // Platform-specific code for loading variables.
   void EmitLoadGlobalCheckExtensions(Variable* var,
@@ -615,6 +640,12 @@ class FullCodeGenerator: public AstVisitor {
   struct BailoutEntry {
     BailoutId id;
     unsigned pc_and_state;
+  };
+
+  struct BackEdgeEntry {
+    BailoutId id;
+    unsigned pc;
+    uint8_t loop_depth;
   };
 
   struct TypeFeedbackCellEntry {
@@ -806,9 +837,12 @@ class FullCodeGenerator: public AstVisitor {
   NestedStatement* nesting_stack_;
   int loop_depth_;
   ZoneList<Handle<Object> >* globals_;
+  Handle<FixedArray> modules_;
+  int module_index_;
   const ExpressionContext* context_;
   ZoneList<BailoutEntry> bailout_entries_;
-  ZoneList<BailoutEntry> stack_checks_;
+  GrowableBitVector prepared_bailout_ids_;
+  ZoneList<BackEdgeEntry> back_edges_;
   ZoneList<TypeFeedbackCellEntry> type_feedback_cells_;
   int ic_total_count_;
   Handle<FixedArray> handler_table_;
@@ -818,6 +852,7 @@ class FullCodeGenerator: public AstVisitor {
 
   friend class NestedStatement;
 
+  DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
   DISALLOW_COPY_AND_ASSIGN(FullCodeGenerator);
 };
 

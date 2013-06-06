@@ -47,10 +47,11 @@ enum TypeCode {
   EXTENSION,
   ACCESSOR,
   RUNTIME_ENTRY,
-  STUB_CACHE_TABLE
+  STUB_CACHE_TABLE,
+  LAZY_DEOPTIMIZATION
 };
 
-const int kTypeCodeCount = STUB_CACHE_TABLE + 1;
+const int kTypeCodeCount = LAZY_DEOPTIMIZATION + 1;
 const int kFirstTypeCode = UNCLASSIFIED;
 
 const int kReferenceIdBits = 16;
@@ -59,6 +60,7 @@ const int kReferenceTypeShift = kReferenceIdBits;
 const int kDebugRegisterBits = 4;
 const int kDebugIdShift = kDebugRegisterBits;
 
+const int kDeoptTableSerializeEntryCount = 8;
 
 // ExternalReferenceTable is a helper class that defines the relationship
 // between external references and their encodings. It is used to build
@@ -309,7 +311,7 @@ int SnapshotByteSource::GetInt() {
 
 
 void SnapshotByteSource::CopyRaw(byte* to, int number_of_bytes) {
-  memcpy(to, data_ + position_, number_of_bytes);
+  OS::MemCopy(to, data_ + position_, number_of_bytes);
   position_ += number_of_bytes;
 }
 
@@ -406,12 +408,11 @@ class SnapshotByteSink {
 class SerializationAddressMapper {
  public:
   SerializationAddressMapper()
-      : serialization_map_(new HashMap(&SerializationMatchFun)),
-        no_allocation_(new AssertNoAllocation()) { }
+      : no_allocation_(),
+        serialization_map_(new HashMap(&SerializationMatchFun)) { }
 
   ~SerializationAddressMapper() {
     delete serialization_map_;
-    delete no_allocation_;
   }
 
   bool IsMapped(HeapObject* obj) {
@@ -448,8 +449,8 @@ class SerializationAddressMapper {
     return reinterpret_cast<void*>(v);
   }
 
+  DisallowHeapAllocation no_allocation_;
   HashMap* serialization_map_;
-  AssertNoAllocation* no_allocation_;
   DISALLOW_COPY_AND_ASSIGN(SerializationAddressMapper);
 };
 
@@ -636,7 +637,7 @@ class StartupSerializer : public Serializer {
   // Serialize the current state of the heap.  The order is:
   // 1) Strong references.
   // 2) Partial snapshot cache.
-  // 3) Weak references (e.g. the symbol table).
+  // 3) Weak references (e.g. the string table).
   virtual void SerializeStrongReferences();
   virtual void SerializeObject(Object* o,
                                HowToCode how_to_code,

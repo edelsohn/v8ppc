@@ -30,6 +30,7 @@
 #include "runtime-profiler.h"
 
 #include "assembler.h"
+#include "bootstrapper.h"
 #include "code-stubs.h"
 #include "compilation-cache.h"
 #include "deoptimizer.h"
@@ -86,17 +87,6 @@ static const int kMaxSizeEarlyOpt =
     5 * FullCodeGenerator::kBackEdgeDistanceUnit;
 
 
-Atomic32 RuntimeProfiler::state_ = 0;
-
-// TODO(isolates): Clean up the semaphore when it is no longer required.
-static LazySemaphore<0>::type semaphore = LAZY_SEMAPHORE_INITIALIZER;
-
-#ifdef DEBUG
-bool RuntimeProfiler::has_been_globally_set_up_ = false;
-#endif
-bool RuntimeProfiler::enabled_ = false;
-
-
 RuntimeProfiler::RuntimeProfiler(Isolate* isolate)
     : isolate_(isolate),
       sampler_threshold_(kSamplerThresholdInit),
@@ -107,15 +97,6 @@ RuntimeProfiler::RuntimeProfiler(Isolate* isolate)
       any_ic_changed_(false),
       code_generated_(false) {
   ClearSampleBuffer();
-}
-
-
-void RuntimeProfiler::GlobalSetUp() {
-  ASSERT(!has_been_globally_set_up_);
-  enabled_ = V8::UseCrankshaft() && FLAG_opt;
-#ifdef DEBUG
-  has_been_globally_set_up_ = true;
-#endif
 }
 
 
@@ -140,10 +121,10 @@ static void GetICCounts(JSFunction* function,
 
 void RuntimeProfiler::Optimize(JSFunction* function, const char* reason) {
   ASSERT(function->IsOptimizable());
-  if (FLAG_trace_opt) {
+
+  if (FLAG_trace_opt && function->PassesHydrogenFilter()) {
     PrintF("[marking ");
-    function->PrintName();
-    PrintF(" 0x%" V8PRIxPTR, reinterpret_cast<intptr_t>(function->address()));
+    function->ShortPrint();
     PrintF(" for recompilation, reason: %s", reason);
     if (FLAG_type_info_threshold > 0) {
       int typeinfo, total, percentage;
@@ -153,7 +134,9 @@ void RuntimeProfiler::Optimize(JSFunction* function, const char* reason) {
     PrintF("]\n");
   }
 
-  if (FLAG_parallel_recompilation) {
+  if (FLAG_parallel_recompilation && !isolate_->bootstrapper()->IsActive()) {
+    ASSERT(!function->IsMarkedForInstallingRecompiledCode());
+    ASSERT(!function->IsInRecompileQueue());
     function->MarkForParallelRecompilation();
   } else {
     // The next call to the function will trigger optimization.
@@ -166,7 +149,8 @@ void RuntimeProfiler::AttemptOnStackReplacement(JSFunction* function) {
   // See AlwaysFullCompiler (in compiler.cc) comment on why we need
   // Debug::has_break_points().
   ASSERT(function->IsMarkedForLazyRecompilation() ||
-         function->IsMarkedForParallelRecompilation());
+         function->IsMarkedForParallelRecompilation() ||
+         function->IsOptimized());
   if (!FLAG_use_osr ||
       isolate_->DebuggerHasBreakPoints() ||
       function->IsBuiltin()) {
@@ -186,30 +170,22 @@ void RuntimeProfiler::AttemptOnStackReplacement(JSFunction* function) {
   // any back edge in any unoptimized frame will trigger on-stack
   // replacement for that frame.
   if (FLAG_trace_osr) {
-    PrintF("[patching stack checks in ");
+    PrintF("[patching back edges in ");
     function->PrintName();
     PrintF(" for on-stack replacement]\n");
   }
 
-  // Get the stack check stub code object to match against.  We aren't
+  // Get the interrupt stub code object to match against.  We aren't
   // prepared to generate it, but we don't expect to have to.
-  bool found_code = false;
-  Code* stack_check_code = NULL;
-  if (FLAG_count_based_interrupts) {
-    InterruptStub interrupt_stub;
-    found_code = interrupt_stub.FindCodeInCache(&stack_check_code);
-  } else  // NOLINT
-  {  // NOLINT
-    StackCheckStub check_stub;
-    found_code = check_stub.FindCodeInCache(&stack_check_code);
-  }
+  Code* interrupt_code = NULL;
+  InterruptStub interrupt_stub;
+  bool found_code = interrupt_stub.FindCodeInCache(&interrupt_code, isolate_);
   if (found_code) {
     Code* replacement_code =
         isolate_->builtins()->builtin(Builtins::kOnStackReplacement);
     Code* unoptimized_code = shared->code();
-    Deoptimizer::PatchStackCheckCode(unoptimized_code,
-                                     stack_check_code,
-                                     replacement_code);
+    Deoptimizer::PatchInterruptCode(
+        unoptimized_code, interrupt_code, replacement_code);
   }
 }
 
@@ -249,6 +225,12 @@ void RuntimeProfiler::AddSample(JSFunction* function, int weight) {
 void RuntimeProfiler::OptimizeNow() {
   HandleScope scope(isolate_);
 
+  if (FLAG_parallel_recompilation) {
+    // Take this as opportunity to process the optimizing compiler thread's
+    // output queue so that it does not unnecessarily keep objects alive.
+    isolate_->optimizing_compiler_thread()->InstallOptimizedFunctions();
+  }
+
   // Run through the JavaScript frames and collect them. If we already
   // have a sample of the function, we mark it for optimizations
   // (eagerly or lazily).
@@ -284,13 +266,20 @@ void RuntimeProfiler::OptimizeNow() {
     Code* shared_code = shared->code();
 
     if (shared_code->kind() != Code::FUNCTION) continue;
+    if (function->IsInRecompileQueue()) continue;
 
-    if (function->IsMarkedForLazyRecompilation() ||
-        function->IsMarkedForParallelRecompilation()) {
+    // Attempt OSR if we are still running unoptimized code even though the
+    // the function has long been marked or even already been optimized.
+    if (!frame->is_optimized() &&
+        (function->IsMarkedForLazyRecompilation() ||
+         function->IsMarkedForParallelRecompilation() ||
+         function->IsOptimized())) {
       int nesting = shared_code->allow_osr_at_loop_nesting_level();
-      if (nesting == 0) AttemptOnStackReplacement(function);
-      int new_nesting = Min(nesting + 1, Code::kMaxLoopNestingMarker);
-      shared_code->set_allow_osr_at_loop_nesting_level(new_nesting);
+      if (nesting < Code::kMaxLoopNestingMarker) {
+        int new_nesting = nesting + 1;
+        shared_code->set_allow_osr_at_loop_nesting_level(new_nesting);
+        AttemptOnStackReplacement(function);
+      }
     }
 
     // Only record top-level code on top of the execution stack and
@@ -376,20 +365,10 @@ void RuntimeProfiler::OptimizeNow() {
 }
 
 
-void RuntimeProfiler::NotifyTick() {
-  if (FLAG_count_based_interrupts) return;
-  isolate_->stack_guard()->RequestRuntimeProfilerTick();
-}
-
-
 void RuntimeProfiler::SetUp() {
-  ASSERT(has_been_globally_set_up_);
   if (!FLAG_watch_ic_patching) {
     ClearSampleBuffer();
   }
-  // If the ticker hasn't already started, make sure to do so to get
-  // the ticks for the runtime profiler.
-  if (IsEnabled()) isolate_->logger()->EnsureTickerStarted();
 }
 
 
@@ -429,53 +408,6 @@ void RuntimeProfiler::UpdateSamplesAfterScavenge() {
 }
 
 
-void RuntimeProfiler::HandleWakeUp(Isolate* isolate) {
-  // The profiler thread must still be waiting.
-  ASSERT(NoBarrier_Load(&state_) >= 0);
-  // In IsolateEnteredJS we have already incremented the counter and
-  // undid the decrement done by the profiler thread. Increment again
-  // to get the right count of active isolates.
-  NoBarrier_AtomicIncrement(&state_, 1);
-  semaphore.Pointer()->Signal();
-}
-
-
-bool RuntimeProfiler::IsSomeIsolateInJS() {
-  return NoBarrier_Load(&state_) > 0;
-}
-
-
-bool RuntimeProfiler::WaitForSomeIsolateToEnterJS() {
-  Atomic32 old_state = NoBarrier_CompareAndSwap(&state_, 0, -1);
-  ASSERT(old_state >= -1);
-  if (old_state != 0) return false;
-  semaphore.Pointer()->Wait();
-  return true;
-}
-
-
-void RuntimeProfiler::StopRuntimeProfilerThreadBeforeShutdown(Thread* thread) {
-  // Do a fake increment. If the profiler is waiting on the semaphore,
-  // the returned state is 0, which can be left as an initial state in
-  // case profiling is restarted later. If the profiler is not
-  // waiting, the increment will prevent it from waiting, but has to
-  // be undone after the profiler is stopped.
-  Atomic32 new_state = NoBarrier_AtomicIncrement(&state_, 1);
-  ASSERT(new_state >= 0);
-  if (new_state == 0) {
-    // The profiler thread is waiting. Wake it up. It must check for
-    // stop conditions before attempting to wait again.
-    semaphore.Pointer()->Signal();
-  }
-  thread->Join();
-  // The profiler thread is now stopped. Undo the increment in case it
-  // was not waiting.
-  if (new_state != 0) {
-    NoBarrier_AtomicIncrement(&state_, -1);
-  }
-}
-
-
 void RuntimeProfiler::RemoveDeadSamples() {
   for (int i = 0; i < kSamplerWindowSize; i++) {
     Object* function = sampler_window_[i];
@@ -491,14 +423,6 @@ void RuntimeProfiler::UpdateSamplesAfterCompact(ObjectVisitor* visitor) {
   for (int i = 0; i < kSamplerWindowSize; i++) {
     visitor->VisitPointer(&sampler_window_[i]);
   }
-}
-
-
-bool RuntimeProfilerRateLimiter::SuspendIfNecessary() {
-  if (!RuntimeProfiler::IsSomeIsolateInJS()) {
-    return RuntimeProfiler::WaitForSomeIsolateToEnterJS();
-  }
-  return false;
 }
 
 

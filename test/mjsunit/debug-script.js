@@ -25,9 +25,11 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Flags: --expose-debug-as debug --expose-gc  --noparallel-recompilation
+// Flags: --expose-debug-as debug --expose-gc --noparallel-recompilation
+// Flags: --send-idle-notification
+
 // Get the Debug object exposed from the debug context global object.
-Debug = debug.Debug
+Debug = debug.Debug;
 
 Date();
 RegExp();
@@ -58,7 +60,7 @@ for (i = 0; i < scripts.length; i++) {
 }
 
 // This has to be updated if the number of native scripts change.
-assertEquals(14, named_native_count);
+assertEquals(16, named_native_count);
 // If no snapshot is used, only the 'gc' extension is loaded.
 // If snapshot is used, all extensions are cached in the snapshot.
 assertTrue(extension_count == 1 || extension_count == 5);

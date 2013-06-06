@@ -54,7 +54,8 @@ IncrementalMarking::IncrementalMarking(Heap* heap)
       should_hurry_(false),
       marking_speed_(0),
       allocated_(0),
-      no_marking_scope_depth_(0) {
+      no_marking_scope_depth_(0),
+      unscanned_bytes_of_large_object_(0) {
 }
 
 
@@ -78,7 +79,7 @@ void IncrementalMarking::RecordWriteSlow(HeapObject* obj,
 
 
 void IncrementalMarking::RecordWriteFromCode(HeapObject* obj,
-                                             Object* value,
+                                             Object** slot,
                                              Isolate* isolate) {
   ASSERT(obj->IsHeapObject());
   IncrementalMarking* marking = isolate->heap()->incremental_marking();
@@ -94,7 +95,7 @@ void IncrementalMarking::RecordWriteFromCode(HeapObject* obj,
         MemoryChunk::kWriteBarrierCounterGranularity);
   }
 
-  marking->RecordWrite(obj, NULL, value);
+  marking->RecordWrite(obj, slot, *slot);
 }
 
 
@@ -175,93 +176,111 @@ void IncrementalMarking::RecordWriteIntoCodeSlow(HeapObject* obj,
 }
 
 
+static void MarkObjectGreyDoNotEnqueue(Object* obj) {
+  if (obj->IsHeapObject()) {
+    HeapObject* heap_obj = HeapObject::cast(obj);
+    MarkBit mark_bit = Marking::MarkBitFrom(HeapObject::cast(obj));
+    if (Marking::IsBlack(mark_bit)) {
+      MemoryChunk::IncrementLiveBytesFromGC(heap_obj->address(),
+                                            -heap_obj->Size());
+    }
+    Marking::AnyToGrey(mark_bit);
+  }
+}
+
+
+static inline void MarkBlackOrKeepGrey(HeapObject* heap_object,
+                                       MarkBit mark_bit,
+                                       int size) {
+  ASSERT(!Marking::IsImpossible(mark_bit));
+  if (mark_bit.Get()) return;
+  mark_bit.Set();
+  MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(), size);
+  ASSERT(Marking::IsBlack(mark_bit));
+}
+
+
+static inline void MarkBlackOrKeepBlack(HeapObject* heap_object,
+                                        MarkBit mark_bit,
+                                        int size) {
+  ASSERT(!Marking::IsImpossible(mark_bit));
+  if (Marking::IsBlack(mark_bit)) return;
+  Marking::MarkBlack(mark_bit);
+  MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(), size);
+  ASSERT(Marking::IsBlack(mark_bit));
+}
+
+
 class IncrementalMarkingMarkingVisitor
     : public StaticMarkingVisitor<IncrementalMarkingMarkingVisitor> {
  public:
   static void Initialize() {
     StaticMarkingVisitor<IncrementalMarkingMarkingVisitor>::Initialize();
-
-    table_.Register(kVisitSharedFunctionInfo, &VisitSharedFunctionInfo);
-
-    table_.Register(kVisitJSFunction, &VisitJSFunction);
-
+    table_.Register(kVisitFixedArray, &VisitFixedArrayIncremental);
+    table_.Register(kVisitNativeContext, &VisitNativeContextIncremental);
     table_.Register(kVisitJSRegExp, &VisitJSRegExp);
+  }
+
+  static const int kProgressBarScanningChunk = 32 * 1024;
+
+  static void VisitFixedArrayIncremental(Map* map, HeapObject* object) {
+    MemoryChunk* chunk = MemoryChunk::FromAddress(object->address());
+    // TODO(mstarzinger): Move setting of the flag to the allocation site of
+    // the array. The visitor should just check the flag.
+    if (FLAG_use_marking_progress_bar &&
+        chunk->owner()->identity() == LO_SPACE) {
+      chunk->SetFlag(MemoryChunk::HAS_PROGRESS_BAR);
+    }
+    if (chunk->IsFlagSet(MemoryChunk::HAS_PROGRESS_BAR)) {
+      Heap* heap = map->GetHeap();
+      // When using a progress bar for large fixed arrays, scan only a chunk of
+      // the array and try to push it onto the marking deque again until it is
+      // fully scanned. Fall back to scanning it through to the end in case this
+      // fails because of a full deque.
+      int object_size = FixedArray::BodyDescriptor::SizeOf(map, object);
+      int start_offset = Max(FixedArray::BodyDescriptor::kStartOffset,
+                             chunk->progress_bar());
+      int end_offset = Min(object_size,
+                           start_offset + kProgressBarScanningChunk);
+      int already_scanned_offset = start_offset;
+      bool scan_until_end = false;
+      do {
+        VisitPointersWithAnchor(heap,
+                                HeapObject::RawField(object, 0),
+                                HeapObject::RawField(object, start_offset),
+                                HeapObject::RawField(object, end_offset));
+        start_offset = end_offset;
+        end_offset = Min(object_size, end_offset + kProgressBarScanningChunk);
+        scan_until_end = heap->incremental_marking()->marking_deque()->IsFull();
+      } while (scan_until_end && start_offset < object_size);
+      chunk->set_progress_bar(start_offset);
+      if (start_offset < object_size) {
+        heap->incremental_marking()->marking_deque()->UnshiftGrey(object);
+        heap->incremental_marking()->NotifyIncompleteScanOfObject(
+            object_size - (start_offset - already_scanned_offset));
+      }
+    } else {
+      FixedArrayVisitor::Visit(map, object);
+    }
+  }
+
+  static void VisitNativeContextIncremental(Map* map, HeapObject* object) {
+    Context* context = Context::cast(object);
+
+    // We will mark cache black with a separate pass
+    // when we finish marking.
+    MarkObjectGreyDoNotEnqueue(context->normalized_map_cache());
+    VisitNativeContext(map, context);
   }
 
   static void VisitJSWeakMap(Map* map, HeapObject* object) {
     Heap* heap = map->GetHeap();
-    Object** start_slot =
-        HeapObject::RawField(object, JSWeakMap::kPropertiesOffset);
     VisitPointers(heap,
-                  start_slot,
-                  start_slot,
+                  HeapObject::RawField(object, JSWeakMap::kPropertiesOffset),
                   HeapObject::RawField(object, JSWeakMap::kSize));
   }
 
-  static void VisitSharedFunctionInfo(Map* map, HeapObject* object) {
-    Heap* heap = map->GetHeap();
-    SharedFunctionInfo* shared = SharedFunctionInfo::cast(object);
-    if (shared->ic_age() != heap->global_ic_age()) {
-      shared->ResetForNewContext(heap->global_ic_age());
-    }
-    FixedBodyVisitor<IncrementalMarkingMarkingVisitor,
-                     SharedFunctionInfo::BodyDescriptor,
-                     void>::Visit(map, object);
-  }
-
-  static const int kScanningChunk = 32 * 1024;
-
-  static int VisitHugeArray(FixedArray* array) {
-    Heap* heap = array->GetHeap();
-    MemoryChunk* chunk = MemoryChunk::FromAddress(array->address());
-    Object** start_slot = array->data_start();
-    int length = array->length();
-
-    if (chunk->owner()->identity() != LO_SPACE) {
-      VisitPointers(heap, start_slot, start_slot, start_slot + length);
-      return length;
-    }
-
-    int from =
-        chunk->IsPartiallyScanned() ? chunk->PartiallyScannedProgress() : 0;
-    int to = Min(from + kScanningChunk, length);
-
-    VisitPointers(heap, start_slot, start_slot + from, start_slot + to);
-
-    if (to == length) {
-      // If it went from black to grey while it was waiting for the next bit to
-      // be scanned then we have to start the scan again.
-      MarkBit mark_bit = Marking::MarkBitFrom(array);
-      if (!Marking::IsBlack(mark_bit)) {
-        ASSERT(Marking::IsGrey(mark_bit));
-        chunk->SetPartiallyScannedProgress(0);
-      } else {
-        chunk->SetCompletelyScanned();
-      }
-    } else {
-      chunk->SetPartiallyScannedProgress(to);
-    }
-    return to - from;
-  }
-
-  static inline void VisitJSFunction(Map* map, HeapObject* object) {
-    Heap* heap = map->GetHeap();
-    // Iterate over all fields in the body but take care in dealing with
-    // the code entry and skip weak fields.
-    Object** start_slot =
-        HeapObject::RawField(object, JSFunction::kPropertiesOffset);
-    VisitPointers(heap,
-                  start_slot,
-                  start_slot,
-                  HeapObject::RawField(object, JSFunction::kCodeEntryOffset));
-    VisitCodeEntry(heap, object->address() + JSFunction::kCodeEntryOffset);
-    VisitPointers(heap,
-                  start_slot,
-                  HeapObject::RawField(object,
-                      JSFunction::kCodeEntryOffset + kPointerSize),
-                  HeapObject::RawField(object,
-                      JSFunction::kNonWeakFieldsEndOffset));
-  }
+  static void BeforeVisitingSharedFunctionInfo(HeapObject* object) {}
 
   INLINE(static void VisitPointer(Heap* heap, Object** p)) {
     Object* obj = *p;
@@ -271,10 +290,20 @@ class IncrementalMarkingMarkingVisitor
     }
   }
 
-  INLINE(static void VisitPointers(Heap* heap,
-                                   Object** anchor,
-                                   Object** start,
-                                   Object** end)) {
+  INLINE(static void VisitPointers(Heap* heap, Object** start, Object** end)) {
+    for (Object** p = start; p < end; p++) {
+      Object* obj = *p;
+      if (obj->NonFailureIsHeapObject()) {
+        heap->mark_compact_collector()->RecordSlot(start, p, obj);
+        MarkObject(heap, obj);
+      }
+    }
+  }
+
+  INLINE(static void VisitPointersWithAnchor(Heap* heap,
+                                             Object** anchor,
+                                             Object** start,
+                                             Object** end)) {
     for (Object** p = start; p < end; p++) {
       Object* obj = *p;
       if (obj->NonFailureIsHeapObject()) {
@@ -289,10 +318,7 @@ class IncrementalMarkingMarkingVisitor
     HeapObject* heap_object = HeapObject::cast(obj);
     MarkBit mark_bit = Marking::MarkBitFrom(heap_object);
     if (mark_bit.data_only()) {
-      if (heap->incremental_marking()->MarkBlackOrKeepGrey(mark_bit)) {
-        MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(),
-                                              heap_object->Size());
-      }
+      MarkBlackOrKeepGrey(heap_object, mark_bit, heap_object->Size());
     } else if (Marking::IsWhite(mark_bit)) {
       heap->incremental_marking()->WhiteToGreyAndPush(heap_object, mark_bit);
     }
@@ -316,10 +342,9 @@ class IncrementalMarkingMarkingVisitor
 
 class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
  public:
-  IncrementalMarkingRootMarkingVisitor(Heap* heap,
-                                       IncrementalMarking* incremental_marking)
-      : heap_(heap),
-        incremental_marking_(incremental_marking) {
+  explicit IncrementalMarkingRootMarkingVisitor(
+      IncrementalMarking* incremental_marking)
+      : incremental_marking_(incremental_marking) {
   }
 
   void VisitPointer(Object** p) {
@@ -338,10 +363,7 @@ class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
     HeapObject* heap_object = HeapObject::cast(obj);
     MarkBit mark_bit = Marking::MarkBitFrom(heap_object);
     if (mark_bit.data_only()) {
-      if (incremental_marking_->MarkBlackOrKeepGrey(mark_bit)) {
-          MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(),
-                                                heap_object->Size());
-      }
+      MarkBlackOrKeepGrey(heap_object, mark_bit, heap_object->Size());
     } else {
       if (Marking::IsWhite(mark_bit)) {
         incremental_marking_->WhiteToGreyAndPush(heap_object, mark_bit);
@@ -349,7 +371,6 @@ class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
     }
   }
 
-  Heap* heap_;
   IncrementalMarking* incremental_marking_;
 };
 
@@ -473,10 +494,16 @@ bool IncrementalMarking::WorthActivating() {
   // debug tests run with incremental marking and some without.
   static const intptr_t kActivationThreshold = 0;
 #endif
-
+  // Only start incremental marking in a safe state: 1) when expose GC is
+  // deactivated, 2) when incremental marking is turned on, 3) when we are
+  // currently not in a GC, and 4) when we are currently not serializing
+  // or deserializing the heap.
   return !FLAG_expose_gc &&
       FLAG_incremental_marking &&
+      FLAG_incremental_marking_steps &&
+      heap_->gc_state() == Heap::NOT_IN_GC &&
       !Serializer::enabled() &&
+      heap_->isolate()->IsInitialized() &&
       heap_->PromotedSpaceSizeOfObjects() > kActivationThreshold;
 }
 
@@ -544,18 +571,21 @@ void IncrementalMarking::UncommitMarkingDeque() {
 }
 
 
-void IncrementalMarking::Start() {
+void IncrementalMarking::Start(CompactionFlag flag) {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Start\n");
   }
   ASSERT(FLAG_incremental_marking);
+  ASSERT(FLAG_incremental_marking_steps);
   ASSERT(state_ == STOPPED);
+  ASSERT(heap_->gc_state() == Heap::NOT_IN_GC);
+  ASSERT(!Serializer::enabled());
+  ASSERT(heap_->isolate()->IsInitialized());
 
   ResetStepCounters();
 
-  if (heap_->old_pointer_space()->IsSweepingComplete() &&
-      heap_->old_data_space()->IsSweepingComplete()) {
-    StartMarking(ALLOW_COMPACTION);
+  if (heap_->IsSweepingComplete()) {
+    StartMarking(flag);
   } else {
     if (FLAG_trace_incremental_marking) {
       PrintF("[IncrementalMarking] Start sweeping.\n");
@@ -564,19 +594,6 @@ void IncrementalMarking::Start() {
   }
 
   heap_->new_space()->LowerInlineAllocationLimit(kAllocatedThreshold);
-}
-
-
-static void MarkObjectGreyDoNotEnqueue(Object* obj) {
-  if (obj->IsHeapObject()) {
-    HeapObject* heap_obj = HeapObject::cast(obj);
-    MarkBit mark_bit = Marking::MarkBitFrom(HeapObject::cast(obj));
-    if (Marking::IsBlack(mark_bit)) {
-      MemoryChunk::IncrementLiveBytesFromGC(heap_obj->address(),
-                                            -heap_obj->Size());
-    }
-    Marking::AnyToGrey(mark_bit);
-  }
 }
 
 
@@ -606,8 +623,8 @@ void IncrementalMarking::StartMarking(CompactionFlag flag) {
 
   ActivateIncrementalWriteBarrier();
 
-#ifdef DEBUG
   // Marking bits are cleared by the sweeper.
+#ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
     heap_->mark_compact_collector()->VerifyMarkbitsAreClean();
   }
@@ -623,7 +640,7 @@ void IncrementalMarking::StartMarking(CompactionFlag flag) {
   }
 
   // Mark strong roots grey.
-  IncrementalMarkingRootMarkingVisitor visitor(heap_, this);
+  IncrementalMarkingRootMarkingVisitor visitor(this);
   heap_->IterateStrongRoots(&visitor, VISIT_ONLY_STRONG);
 
   // Ready to start incremental marking.
@@ -679,9 +696,11 @@ void IncrementalMarking::UpdateMarkingDequeAfterScavenge() {
       ASSERT(new_top != marking_deque_.bottom());
 #ifdef DEBUG
         MarkBit mark_bit = Marking::MarkBitFrom(obj);
+        MemoryChunk* chunk = MemoryChunk::FromAddress(obj->address());
         ASSERT(Marking::IsGrey(mark_bit) ||
                (obj->IsFiller() && Marking::IsWhite(mark_bit)) ||
-               MemoryChunk::FromAddress(obj->address())->IsPartiallyScanned());
+               (chunk->IsFlagSet(MemoryChunk::HAS_PROGRESS_BAR) &&
+                Marking::IsBlack(mark_bit)));
 #endif
     }
   }
@@ -693,68 +712,81 @@ void IncrementalMarking::UpdateMarkingDequeAfterScavenge() {
 }
 
 
+void IncrementalMarking::VisitObject(Map* map, HeapObject* obj, int size) {
+  MarkBit map_mark_bit = Marking::MarkBitFrom(map);
+  if (Marking::IsWhite(map_mark_bit)) {
+    WhiteToGreyAndPush(map, map_mark_bit);
+  }
+
+  IncrementalMarkingMarkingVisitor::IterateBody(map, obj);
+
+  MarkBit mark_bit = Marking::MarkBitFrom(obj);
+#ifdef DEBUG
+  MemoryChunk* chunk = MemoryChunk::FromAddress(obj->address());
+  SLOW_ASSERT(Marking::IsGrey(mark_bit) ||
+              (obj->IsFiller() && Marking::IsWhite(mark_bit)) ||
+              (chunk->IsFlagSet(MemoryChunk::HAS_PROGRESS_BAR) &&
+               Marking::IsBlack(mark_bit)));
+#endif
+  MarkBlackOrKeepBlack(obj, mark_bit, size);
+}
+
+
+void IncrementalMarking::ProcessMarkingDeque(intptr_t bytes_to_process) {
+  Map* filler_map = heap_->one_pointer_filler_map();
+  while (!marking_deque_.IsEmpty() && bytes_to_process > 0) {
+    HeapObject* obj = marking_deque_.Pop();
+
+    // Explicitly skip one word fillers. Incremental markbit patterns are
+    // correct only for objects that occupy at least two words.
+    Map* map = obj->map();
+    if (map == filler_map) continue;
+
+    int size = obj->SizeFromMap(map);
+    unscanned_bytes_of_large_object_ = 0;
+    VisitObject(map, obj, size);
+    bytes_to_process -= (size - unscanned_bytes_of_large_object_);
+  }
+}
+
+
+void IncrementalMarking::ProcessMarkingDeque() {
+  Map* filler_map = heap_->one_pointer_filler_map();
+  while (!marking_deque_.IsEmpty()) {
+    HeapObject* obj = marking_deque_.Pop();
+
+    // Explicitly skip one word fillers. Incremental markbit patterns are
+    // correct only for objects that occupy at least two words.
+    Map* map = obj->map();
+    if (map == filler_map) continue;
+
+    VisitObject(map, obj, obj->SizeFromMap(map));
+  }
+}
+
+
 void IncrementalMarking::Hurry() {
   if (state() == MARKING) {
     double start = 0.0;
-    if (FLAG_trace_incremental_marking) {
-      PrintF("[IncrementalMarking] Hurry\n");
+    if (FLAG_trace_incremental_marking || FLAG_print_cumulative_gc_stat) {
       start = OS::TimeCurrentMillis();
+      if (FLAG_trace_incremental_marking) {
+        PrintF("[IncrementalMarking] Hurry\n");
+      }
     }
     // TODO(gc) hurry can mark objects it encounters black as mutator
     // was stopped.
-    Map* filler_map = heap_->one_pointer_filler_map();
-    Map* native_context_map = heap_->native_context_map();
-    do {
-      while (!marking_deque_.IsEmpty()) {
-        HeapObject* obj = marking_deque_.Pop();
-
-        // Explicitly skip one word fillers. Incremental markbit patterns are
-        // correct only for objects that occupy at least two words.
-        Map* map = obj->map();
-        if (map == filler_map) {
-          continue;
-        } else if (map == native_context_map) {
-          // Native contexts have weak fields.
-          IncrementalMarkingMarkingVisitor::VisitNativeContext(map, obj);
-          ASSERT(!Marking::IsBlack(Marking::MarkBitFrom(obj)));
-          MemoryChunk::IncrementLiveBytesFromGC(obj->address(), obj->Size());
-        } else if (map->instance_type() == FIXED_ARRAY_TYPE &&
-          FixedArray::cast(obj)->length() >
-                IncrementalMarkingMarkingVisitor::kScanningChunk) {
-          MarkBit map_mark_bit = Marking::MarkBitFrom(map);
-          if (Marking::IsWhite(map_mark_bit)) {
-            WhiteToGreyAndPush(map, map_mark_bit);
-          }
-          MarkBit mark_bit = Marking::MarkBitFrom(obj);
-          if (!Marking::IsBlack(mark_bit)) {
-            MemoryChunk::IncrementLiveBytesFromGC(obj->address(), obj->Size());
-          } else {
-            ASSERT(
-                MemoryChunk::FromAddress(obj->address())->IsPartiallyScanned());
-          }
-          IncrementalMarkingMarkingVisitor::VisitHugeArray(
-                FixedArray::cast(obj));
-         } else {
-          MarkBit map_mark_bit = Marking::MarkBitFrom(map);
-          if (Marking::IsWhite(map_mark_bit)) {
-            WhiteToGreyAndPush(map, map_mark_bit);
-          }
-          IncrementalMarkingMarkingVisitor::IterateBody(map, obj);
-          ASSERT(!Marking::IsBlack(Marking::MarkBitFrom(obj)));
-          MemoryChunk::IncrementLiveBytesFromGC(obj->address(), obj->Size());
-        }
-
-        MarkBit mark_bit = Marking::MarkBitFrom(obj);
-        Marking::MarkBlack(mark_bit);
-      }
-      state_ = COMPLETE;
+    ProcessMarkingDeque();
+    state_ = COMPLETE;
+    if (FLAG_trace_incremental_marking || FLAG_print_cumulative_gc_stat) {
+      double end = OS::TimeCurrentMillis();
+      double delta = end - start;
+      heap_->AddMarkingTime(delta);
       if (FLAG_trace_incremental_marking) {
-        double end = OS::TimeCurrentMillis();
         PrintF("[IncrementalMarking] Complete (hurry), spent %d ms.\n",
-               static_cast<int>(end - start));
+               static_cast<int>(delta));
       }
-      MarkCompactCollector::ProcessLargePostponedArrays(heap_, &marking_deque_);
-    } while (!marking_deque_.IsEmpty());
+    }
   }
 
   if (FLAG_cleanup_code_caches_at_gc) {
@@ -843,6 +875,17 @@ void IncrementalMarking::MarkingComplete(CompletionAction action) {
 }
 
 
+void IncrementalMarking::OldSpaceStep(intptr_t allocated) {
+  if (IsStopped() && WorthActivating() && heap_->NextGCIsLikelyToBeFull()) {
+    // TODO(hpayer): Let's play safe for now, but compaction should be
+    // in principle possible.
+    Start(PREVENT_COMPACTION);
+  } else {
+    Step(allocated * kFastMarking / kInitialMarkingSpeed, GC_VIA_STACK_GUARD);
+  }
+}
+
+
 void IncrementalMarking::Step(intptr_t allocated_bytes,
                               CompletionAction action) {
   if (heap_->gc_state() != Heap::NOT_IN_GC ||
@@ -869,7 +912,7 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
   // allocation), so to reduce the lumpiness we don't use the write barriers
   // invoked since last step directly to determine the amount of work to do.
   intptr_t bytes_to_process =
-      marking_speed_ * Max(allocated_, kWriteBarriersInvokedThreshold);
+      marking_speed_ * Max(allocated_, write_barriers_invoked_since_last_step_);
   allocated_ = 0;
   write_barriers_invoked_since_last_step_ = 0;
 
@@ -877,83 +920,19 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
 
   double start = 0;
 
-  if (FLAG_trace_incremental_marking || FLAG_trace_gc) {
+  if (FLAG_trace_incremental_marking || FLAG_trace_gc ||
+      FLAG_print_cumulative_gc_stat) {
     start = OS::TimeCurrentMillis();
   }
 
   if (state_ == SWEEPING) {
-    if (heap_->AdvanceSweepers(static_cast<int>(bytes_to_process))) {
+    if (heap_->EnsureSweepersProgressed(static_cast<int>(bytes_to_process))) {
       bytes_scanned_ = 0;
       StartMarking(PREVENT_COMPACTION);
     }
   } else if (state_ == MARKING) {
-    Map* filler_map = heap_->one_pointer_filler_map();
-    Map* native_context_map = heap_->native_context_map();
-    while (true) {
-      while (!marking_deque_.IsEmpty() && bytes_to_process > 0) {
-        HeapObject* obj = marking_deque_.Pop();
-
-        // Explicitly skip one word fillers. Incremental markbit patterns are
-        // correct only for objects that occupy at least two words.
-        Map* map = obj->map();
-        if (map == filler_map) continue;
-
-        int size = obj->SizeFromMap(map);
-        MarkBit map_mark_bit = Marking::MarkBitFrom(map);
-        if (Marking::IsWhite(map_mark_bit)) {
-          WhiteToGreyAndPush(map, map_mark_bit);
-        }
-
-        // TODO(gc) switch to static visitor instead of normal visitor.
-        if (map == native_context_map) {
-          // Native contexts have weak fields.
-          Context* ctx = Context::cast(obj);
-
-          // We will mark cache black with a separate pass
-          // when we finish marking.
-          MarkObjectGreyDoNotEnqueue(ctx->normalized_map_cache());
-
-          IncrementalMarkingMarkingVisitor::VisitNativeContext(map, ctx);
-          bytes_to_process -= size;
-          SLOW_ASSERT(Marking::IsGrey(Marking::MarkBitFrom(obj)));
-          MemoryChunk::IncrementLiveBytesFromGC(obj->address(), size);
-        } else if (map->instance_type() == FIXED_ARRAY_TYPE &&
-          FixedArray::cast(obj)->length() >
-              IncrementalMarkingMarkingVisitor::kScanningChunk) {
-          SLOW_ASSERT(
-              Marking::IsGrey(Marking::MarkBitFrom(obj)) ||
-              MemoryChunk::FromAddress(obj->address())->IsPartiallyScanned());
-          bytes_to_process -=
-              IncrementalMarkingMarkingVisitor::VisitHugeArray(
-                  FixedArray::cast(obj));
-          MarkBit obj_mark_bit = Marking::MarkBitFrom(obj);
-          if (!Marking::IsBlack(obj_mark_bit)) {
-            MemoryChunk::IncrementLiveBytesFromGC(obj->address(), size);
-          }
-         } else {
-          IncrementalMarkingMarkingVisitor::IterateBody(map, obj);
-          bytes_to_process -= size;
-          SLOW_ASSERT(
-              Marking::IsGrey(Marking::MarkBitFrom(obj)) ||
-              (obj->IsFiller() && Marking::IsWhite(Marking::MarkBitFrom(obj))));
-          MemoryChunk::IncrementLiveBytesFromGC(obj->address(), size);
-        }
-
-        MarkBit obj_mark_bit = Marking::MarkBitFrom(obj);
-        Marking::MarkBlack(obj_mark_bit);
-      }
-      if (marking_deque_.IsEmpty()) {
-        MarkCompactCollector::ProcessLargePostponedArrays(heap_,
-                                                          &marking_deque_);
-        if (marking_deque_.IsEmpty()) {
-          MarkingComplete(action);
-          break;
-         }
-       } else {
-        ASSERT(bytes_to_process <= 0);
-        break;
-       }
-    }
+    ProcessMarkingDeque(bytes_to_process);
+    if (marking_deque_.IsEmpty()) MarkingComplete(action);
   }
 
   steps_count_++;
@@ -1012,7 +991,7 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
         PrintPID("Postponing speeding up marking until marking starts\n");
       }
     } else {
-      marking_speed_ += kMarkingSpeedAccellerationInterval;
+      marking_speed_ += kMarkingSpeedAccelleration;
       marking_speed_ = static_cast<int>(
           Min(kMaxMarkingSpeed,
               static_cast<intptr_t>(marking_speed_ * 1.3)));
@@ -1022,12 +1001,14 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
     }
   }
 
-  if (FLAG_trace_incremental_marking || FLAG_trace_gc) {
+  if (FLAG_trace_incremental_marking || FLAG_trace_gc ||
+      FLAG_print_cumulative_gc_stat) {
     double end = OS::TimeCurrentMillis();
     double delta = (end - start);
     longest_step_ = Max(longest_step_, delta);
     steps_took_ += delta;
     steps_took_since_last_gc_ += delta;
+    heap_->AddMarkingTime(delta);
   }
 }
 

@@ -88,16 +88,6 @@ static const v8::internal::Register arg2 = rsi;
 #define __ assm.
 
 
-static v8::Persistent<v8::Context> env;
-
-
-static void InitializeVM() {
-  if (env.IsEmpty()) {
-    env = v8::Context::New();
-  }
-}
-
-
 TEST(AssemblerX64ReturnOperation) {
   OS::SetUp();
   // Allocate an executable page of memory.
@@ -361,7 +351,8 @@ TEST(OperandRegisterDependency) {
 
 TEST(AssemblerX64LabelChaining) {
   // Test chaining of label usages within instructions (issue 1644).
-  v8::HandleScope scope;
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
   Assembler assm(Isolate::Current(), NULL, 0);
 
   Label target;
@@ -373,10 +364,11 @@ TEST(AssemblerX64LabelChaining) {
 
 
 TEST(AssemblerMultiByteNop) {
-  InitializeVM();
-  v8::HandleScope scope;
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
   v8::internal::byte buffer[1024];
-  Assembler assm(Isolate::Current(), buffer, sizeof(buffer));
+  Isolate* isolate = Isolate::Current();
+  Assembler assm(isolate, buffer, sizeof(buffer));
   __ push(rbx);
   __ push(rcx);
   __ push(rdx);
@@ -425,11 +417,10 @@ TEST(AssemblerMultiByteNop) {
 
   CodeDesc desc;
   assm.GetCode(&desc);
-  Code* code = Code::cast(HEAP->CreateCode(
+  Code* code = Code::cast(isolate->heap()->CreateCode(
       desc,
       Code::ComputeFlags(Code::STUB),
-      v8::internal::Handle<v8::internal::Object>(
-          HEAP->undefined_value()))->ToObjectChecked());
+      v8::internal::Handle<Code>())->ToObjectChecked());
   CHECK(code->IsCode());
 
   F0 f = FUNCTION_CAST<F0>(code->entry());

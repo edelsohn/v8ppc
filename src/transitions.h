@@ -39,23 +39,32 @@ namespace internal {
 
 
 // TransitionArrays are fixed arrays used to hold map transitions for property,
-// constant, and element changes.
-// The format of the these objects is:
-// [0] Descriptor array
-// [1] Undefined or back pointer map
-// [2] Smi(0) or elements transition map
-// [3] Smi(0) or fixed array of prototype transitions
-// [4] First transition
+// constant, and element changes. They can either be simple transition arrays
+// that store a single property transition, or a full transition array that has
+// space for elements transitions, prototype transitions and multiple property
+// transitons. The details related to property transitions are accessed in the
+// descriptor array of the target map. In the case of a simple transition, the
+// key is also read from the descriptor array of the target map.
+//
+// The simple format of the these objects is:
+// [0] Undefined or back pointer map
+// [1] Single transition
+//
+// The full format is:
+// [0] Undefined or back pointer map
+// [1] Smi(0) or elements transition map
+// [2] Smi(0) or fixed array of prototype transitions
+// [3] First transition
 // [length() - kTransitionSize] Last transition
 class TransitionArray: public FixedArray {
  public:
   // Accessors for fetching instance transition at transition number.
-  inline String* GetKey(int transition_number);
-  inline void SetKey(int transition_number, String* value);
+  inline Name* GetKey(int transition_number);
+  inline void SetKey(int transition_number, Name* value);
   inline Object** GetKeySlot(int transition_number);
   int GetSortedKeyIndex(int transition_number) { return transition_number; }
 
-  String* GetSortedKey(int transition_number) {
+  Name* GetSortedKey(int transition_number) {
     return GetKey(transition_number);
   }
 
@@ -70,11 +79,6 @@ class TransitionArray: public FixedArray {
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   inline bool HasElementsTransition();
   inline void ClearElementsTransition();
-
-  inline DescriptorArray* descriptors();
-  inline void set_descriptors(DescriptorArray* descriptors);
-  inline JSGlobalPropertyCell* descriptors_pointer();
-  inline void set_descriptors_pointer(JSGlobalPropertyCell* pointer);
 
   inline Object* back_pointer_storage();
   inline void set_back_pointer_storage(
@@ -101,20 +105,16 @@ class TransitionArray: public FixedArray {
   // Allocate a new transition array with a single entry.
   static MUST_USE_RESULT MaybeObject* NewWith(
       SimpleTransitionFlag flag,
-      String* key,
+      Name* key,
       Map* target,
-      JSGlobalPropertyCell* descriptor_pointer,
       Object* back_pointer);
-
-  static MUST_USE_RESULT MaybeObject* AllocateDescriptorsHolder(
-      JSGlobalPropertyCell* descriptor_pointer);
 
   MUST_USE_RESULT MaybeObject* ExtendToFullTransitionArray();
 
   // Copy the transition array, inserting a new transition.
   // TODO(verwaest): This should not cause an existing transition to be
   // overwritten.
-  MUST_USE_RESULT MaybeObject* CopyInsert(String* name, Map* target);
+  MUST_USE_RESULT MaybeObject* CopyInsert(Name* name, Map* target);
 
   // Copy a single transition from the origin array.
   inline void NoIncrementalWriteBarrierCopyFrom(TransitionArray* origin,
@@ -122,14 +122,11 @@ class TransitionArray: public FixedArray {
                                                 int target_transition);
 
   // Search a transition for a given property name.
-  inline int Search(String* name);
+  inline int Search(Name* name);
 
   // Allocates a TransitionArray.
-  MUST_USE_RESULT static MaybeObject* Allocate(
-      int number_of_transitions,
-      JSGlobalPropertyCell* descriptors_cell);
+  MUST_USE_RESULT static MaybeObject* Allocate(int number_of_transitions);
 
-  bool IsDescriptorsHolder() { return length() == kDescriptorsHolderSize; }
   bool IsSimpleTransition() { return length() == kSimpleTransitionSize; }
   bool IsFullTransitionArray() { return length() >= kFirstIndex; }
 
@@ -139,24 +136,20 @@ class TransitionArray: public FixedArray {
   // Constant for denoting key was not found.
   static const int kNotFound = -1;
 
-  static const int kDescriptorsPointerIndex = 0;
-  static const int kBackPointerStorageIndex = 1;
-  static const int kDescriptorsHolderSize = 2;
+  static const int kBackPointerStorageIndex = 0;
 
   // Layout for full transition arrays.
-  static const int kElementsTransitionIndex = 2;
-  static const int kPrototypeTransitionsIndex = 3;
-  static const int kFirstIndex = 4;
+  static const int kElementsTransitionIndex = 1;
+  static const int kPrototypeTransitionsIndex = 2;
+  static const int kFirstIndex = 3;
 
   // Layout for simple transition arrays.
-  static const int kSimpleTransitionTarget = 2;
-  static const int kSimpleTransitionSize = 3;
+  static const int kSimpleTransitionTarget = 1;
+  static const int kSimpleTransitionSize = 2;
   static const int kSimpleTransitionIndex = 0;
   STATIC_ASSERT(kSimpleTransitionIndex != kNotFound);
 
-  static const int kDescriptorsPointerOffset = FixedArray::kHeaderSize;
-  static const int kBackPointerStorageOffset = kDescriptorsPointerOffset +
-                                               kPointerSize;
+  static const int kBackPointerStorageOffset = FixedArray::kHeaderSize;
 
   // Layout for the full transition array header.
   static const int kElementsTransitionOffset = kBackPointerStorageOffset +
@@ -202,7 +195,7 @@ class TransitionArray: public FixedArray {
   }
 
   inline void NoIncrementalWriteBarrierSet(int transition_number,
-                                           String* key,
+                                           Name* key,
                                            Map* target);
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(TransitionArray);
