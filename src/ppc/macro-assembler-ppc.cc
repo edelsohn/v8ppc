@@ -835,8 +835,9 @@ void MacroAssembler::VFPCompareAndLoadFlags(const DwVfpRegister src1,
 }
 
 void MacroAssembler::Vmov(const DwVfpRegister dst,
-                          const double imm,
-                          const Register scratch) {
+                          const double src,
+                          const Register scratch,
+                          const Condition cond) {
 #ifdef PENGUIN_CLEANUP
   ASSERT(CpuFeatures::IsEnabled(VFP2));
   static const DoubleRepresentation minus_zero(-0.0);
@@ -1726,9 +1727,12 @@ void MacroAssembler::Allocate(int object_size,
   // Set up allocation top address and object size registers.
   Register topaddr = scratch1;
   Register obj_size_reg = scratch2;
-  mov(topaddr, Operand(new_space_allocation_top));
-  // this won't work for very large object on PowerPC
-  li(obj_size_reg, Operand(object_size));
+  mov(topaddr, Operand(allocation_top));
+  Operand obj_size_operand = Operand(object_size);
+  if (!obj_size_operand.is_single_instruction(this)) {
+    // We are about to steal IP, so we need to load this value first
+    li(obj_size_reg, obj_size_operand);
+  }
 
   // This code stores a temporary value in ip. This is OK, as the code below
   // does not need ip for implicit literal generation.
@@ -2003,7 +2007,7 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
   ExternalReference high_promotion_mode = ExternalReference::
       new_space_high_promotion_mode_active_address(isolate());
   mov(scratch1, Operand(high_promotion_mode));
-  ldw(scratch1, MemOperand(scratch1, 0));
+  lwz(scratch1, MemOperand(scratch1, 0));
   cmpi(scratch1, Operand::Zero());
   b(eq, &allocate_new_space);
 
@@ -2818,7 +2822,7 @@ void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid,
 void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin) {
   mov(r4, Operand(builtin));
   CEntryStub stub(1);
-  Jump(stub.GetCode(), RelocInfo::CODE_TARGET);
+  Jump(stub.GetCode(isolate()), RelocInfo::CODE_TARGET);
 }
 
 
