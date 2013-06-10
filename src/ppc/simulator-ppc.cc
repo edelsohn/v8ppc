@@ -339,7 +339,7 @@ void PPCDebugger::Debug() {
                 PrintF("\n");
               }
             }
-            for (int i = 0; i < DwVfpRegister::NumRegisters; i++) {
+            for (int i = 0; i < DwVfpRegister::NumRegisters(); i++) {
               dvalue = GetFPDoubleRegisterValue(i);
               uint64_t as_words = BitCast<uint64_t>(dvalue);
               PrintF("%3s: %f 0x%08x %08x\n",
@@ -991,16 +991,18 @@ ReturnType Simulator::GetFromFPRegister(int reg_index) {
 
 // For use in calls that take two double values which are currently
 // in d1 and d2
-void Simulator::GetFpArgs(double* x, double* y) {
+void Simulator::GetFpArgs(double* x, double* y, int32_t *z) {
   *x = get_double_from_d_register(1);
   *y = get_double_from_d_register(2);
 }
 
+#if 0  // no longer used
 // For use in calls that take one double value, constructed either
 // from r3 and r4 or d1.
 void Simulator::GetFpArgs(double* x) {
   *x = vfp_register[1];
 }
+
 
 
 // For use in calls that take one double value constructed either
@@ -1009,7 +1011,7 @@ void Simulator::GetFpArgs(double* x, int32_t* y) {
   *x = vfp_register[1];
   *y = registers_[1];
 }
-
+#endif
 
 // The return value is in d1.
 // ugly - due to ARM heritage simulator single/double registers overlap
@@ -1313,7 +1315,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
           reinterpret_cast<intptr_t>(redirection->external_function());
       if (fp_call) {
         double dval0, dval1;  // one or two double parameters
-        int32_t ival;         // zero or one integer parameters
+        int32_t ival=0;       // zero or one integer parameters
         int64_t iresult = 0;  // integer return value
         double dresult = 0;   // double return value
         GetFpArgs(&dval0, &dval1, &ival);
@@ -2058,7 +2060,7 @@ void Simulator::DecodeExt4(Instruction* instr) {
       if (fra_val < frb_val) { bf |= 0x80000000; }
       if (fra_val > frb_val) { bf |= 0x40000000; }
       if (fra_val == frb_val) { bf |= 0x20000000; }
-      if (isunordered(fra_val, frb_val)) { bf |= 0x10000000; }
+      if (std::isunordered(fra_val, frb_val)) { bf |= 0x10000000; }
       int condition_mask = 0xF0000000 >> (cr*4);
       int condition =  bf >> (cr*4);
       condition_reg_ = (condition_reg_ & ~condition_mask) | condition;
