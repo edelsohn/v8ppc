@@ -34,11 +34,11 @@
 
 #include "codegen.h"
 #include "macro-assembler.h"
+#include "simulator-ppc.h"
 
 namespace v8 {
 namespace internal {
 
-#define __ ACCESS_MASM(masm)
 
 UnaryMathFunction CreateTranscendentalFunction(TranscendentalCache::Type type) {
   switch (type) {
@@ -50,6 +50,73 @@ UnaryMathFunction CreateTranscendentalFunction(TranscendentalCache::Type type) {
   }
   return NULL;
 }
+
+
+#define __ masm.
+
+
+#if defined(USE_SIMULATOR)
+byte* fast_exp_arm_machine_code = NULL;
+double fast_exp_simulator(double x) {
+  return Simulator::current(Isolate::Current())->CallFP(
+      fast_exp_arm_machine_code, x, 0);
+}
+#endif
+
+
+UnaryMathFunction CreateExpFunction() {
+  if (!FLAG_fast_math) return &exp;
+  size_t actual_size;
+  byte* buffer = static_cast<byte*>(OS::Allocate(1 * KB, &actual_size, true));
+  if (buffer == NULL) return &exp;
+  ExternalReference::InitializeMathExpData();
+
+  MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
+
+  {
+    DwVfpRegister input = d0;
+    DwVfpRegister result = d1;
+    DwVfpRegister double_scratch1 = d2;
+    DwVfpRegister double_scratch2 = d3;
+    Register temp1 = r4;
+    Register temp2 = r5;
+    Register temp3 = r6;
+
+    if (masm.use_eabi_hardfloat()) {
+      // Input value is in d0 anyway, nothing to do.
+    } else {
+      __ vmov(input, r0, r1);
+    }
+    __ Push(temp3, temp2, temp1);
+    MathExpGenerator::EmitMathExp(
+        &masm, input, result, double_scratch1, double_scratch2,
+        temp1, temp2, temp3);
+    __ Pop(temp3, temp2, temp1);
+    if (masm.use_eabi_hardfloat()) {
+      __ vmov(d0, result);
+    } else {
+      __ vmov(r0, r1, result);
+    }
+    __ Ret();
+  }
+
+  CodeDesc desc;
+  masm.GetCode(&desc);
+  ASSERT(!RelocInfo::RequiresRelocation(desc));
+
+  CPU::FlushICache(buffer, actual_size);
+  OS::ProtectCode(buffer, actual_size);
+
+#if !defined(USE_SIMULATOR)
+  return FUNCTION_CAST<UnaryMathFunction>(buffer);
+#else
+  fast_exp_arm_machine_code = buffer;
+  return &fast_exp_simulator;
+#endif
+}
+
+
+#undef __
 
 
 UnaryMathFunction CreateSqrtFunction() {
@@ -76,8 +143,11 @@ void StubRuntimeCallHelper::AfterCall(MacroAssembler* masm) const {
 // -------------------------------------------------------------------------
 // Code generators
 
+#define __ ACCESS_MASM(masm)
+
 void ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
-    MacroAssembler* masm) {
+    MacroAssembler* masm, AllocationSiteMode mode,
+    Label* allocation_site_info_found) {
   // ----------- S t a t e -------------
   //  -- r3    : value
   //  -- r4    : key
@@ -86,6 +156,12 @@ void ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
   //  -- r6    : target map, scratch for subsequent call
   //  -- r7    : scratch (elements)
   // -----------------------------------
+  if (mode == TRACK_ALLOCATION_SITE) {
+    ASSERT(allocation_site_info_found != NULL);
+    __ TestJSArrayForAllocationSiteInfo(r5, r7);
+    __ b(eq, allocation_site_info_found);
+  }
+
   // Set transitioned map.
   __ stw(r6, FieldMemOperand(r5, HeapObject::kMapOffset));
   __ RecordWriteField(r5,
@@ -100,7 +176,7 @@ void ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
 
 
 void ElementsTransitionGenerator::GenerateSmiToDouble(
-    MacroAssembler* masm, Label* fail) {
+    MacroAssembler* masm, AllocationSiteMode mode, Label* fail) {
   // ----------- S t a t e -------------
   //  -- r3    : value
   //  -- r4    : key
@@ -110,7 +186,11 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   //  -- r7    : scratch (elements)
   // -----------------------------------
   Label loop, entry, convert_hole, gc_required, only_change_map, done;
-  bool vfp2_supported = CpuFeatures::IsSupported(VFP2);
+
+  if (mode == TRACK_ALLOCATION_SITE) {
+    __ TestJSArrayForAllocationSiteInfo(r5, r7);
+    __ b(eq, fail);
+  }
 
   // Check for empty arrays, which only require a map transition and no changes
   // to the backing store.
@@ -127,27 +207,8 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // Use lr as a temporary register.
   __ slwi(lr, r8, Operand(2));
   __ add(lr, lr, Operand(FixedDoubleArray::kHeaderSize + kPointerSize));
-  __ AllocateInNewSpace(lr, r9, r10, r22, &gc_required, NO_ALLOCATION_FLAGS);
+  __ Allocate(lr, r9, r10, r22, &gc_required, DOUBLE_ALIGNMENT);
   // r9: destination FixedDoubleArray, not tagged as heap object.
-
-  // Align the array conveniently for doubles.
-  // Store a filler value in the unused memory.
-  Label aligned, aligned_done;
-  __ andi(r0, r9, Operand(kDoubleAlignmentMask));
-  __ cmpi(r0, Operand(0));
-  __ mov(ip, Operand(masm->isolate()->factory()->one_pointer_filler_map()));
-  __ beq(&aligned);
-  // Store at the beginning of the allocated memory and update the base pointer.
-  __ stw(ip, MemOperand(r9));
-  __ add(r9, r9, Operand(kPointerSize));
-  __ b(&aligned_done);
-
-  __ bind(&aligned);
-  // Store the filler at the end of the allocated memory.
-  __ sub(lr, lr, Operand(kPointerSize));
-  __ stw(ip, MemOperand(r9, lr));
-
-  __ bind(&aligned_done);
 
   // Set destination FixedDoubleArray's length and map.
   __ LoadRoot(r22, Heap::kFixedDoubleArrayMapRootIndex);
@@ -188,8 +249,6 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // r8: kHoleNanUpper32
   // r9: end of destination FixedDoubleArray, not tagged
   // r10: begin of FixedDoubleArray element fields, not tagged
-  if (!vfp2_supported) __ Push(r4, r3);
-
   __ b(&entry);
 
   __ bind(&only_change_map);
@@ -198,7 +257,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
                       HeapObject::kMapOffset,
                       r6,
                       r22,
-                      kLRHasBeenSaved,
+                      kLRHasNotBeenSaved,
                       kDontSaveFPRegs,
                       OMIT_REMEMBERED_SET,
                       OMIT_SMI_CHECK);
@@ -242,14 +301,13 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   __ cmp(r10, r9);
   __ blt(&loop);
 
-  if (!vfp2_supported) __ Pop(r4, r3);
   __ pop(lr);
   __ bind(&done);
 }
 
 
 void ElementsTransitionGenerator::GenerateDoubleToObject(
-    MacroAssembler* masm, Label* fail) {
+    MacroAssembler* masm, AllocationSiteMode mode, Label* fail) {
   // ----------- S t a t e -------------
   //  -- r3    : value
   //  -- r4    : key
@@ -260,6 +318,11 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   // -----------------------------------
   // we also use ip as a scratch register
   Label entry, loop, convert_hole, gc_required, only_change_map;
+
+  if (mode == TRACK_ALLOCATION_SITE) {
+    __ TestJSArrayForAllocationSiteInfo(r5, r7);
+    __ b(eq, fail);
+  }
 
   // Check for empty arrays, which only require a map transition and no changes
   // to the backing store.
@@ -276,7 +339,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ li(r3, Operand(FixedDoubleArray::kHeaderSize));
   __ slwi(ip, r8, Operand(1));
   __ add(r3, r3, ip);
-  __ AllocateInNewSpace(r3, r9, r10, r22, &gc_required, NO_ALLOCATION_FLAGS);
+  __ Allocate(r3, r9, r10, r22, &gc_required, NO_ALLOCATION_FLAGS);
   // r9: destination FixedArray, not tagged as heap object
   // Set destination FixedDoubleArray's length and map.
   __ LoadRoot(r22, Heap::kFixedArrayMapRootIndex);
@@ -409,7 +472,7 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
   // the string.
   __ bind(&cons_string);
   __ lwz(result, FieldMemOperand(string, ConsString::kSecondOffset));
-  __ CompareRoot(result, Heap::kEmptyStringRootIndex);
+  __ CompareRoot(result, Heap::kempty_stringRootIndex);
   __ bne(call_runtime);
   // Get the first of the two strings and load its instance type.
   __ lwz(string, FieldMemOperand(string, ConsString::kFirstOffset));
@@ -429,7 +492,7 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
   __ bne(&external_string);
 
   // Prepare sequential strings
-  STATIC_ASSERT(SeqTwoByteString::kHeaderSize == SeqAsciiString::kHeaderSize);
+  STATIC_ASSERT(SeqTwoByteString::kHeaderSize == SeqOneByteString::kHeaderSize);
   __ add(string,
          string,
          Operand(SeqTwoByteString::kHeaderSize - kHeapObjectTag));
@@ -466,6 +529,77 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
   // Ascii string.
   __ add(result, string, index);
   __ lbz(result, MemOperand(result));
+  __ bind(&done);
+}
+
+static MemOperand ExpConstant(int index, Register base) {
+  return MemOperand(base, index * kDoubleSize);
+}
+
+
+void MathExpGenerator::EmitMathExp(MacroAssembler* masm,
+                                   DwVfpRegister input,
+                                   DwVfpRegister result,
+                                   DwVfpRegister double_scratch1,
+                                   DwVfpRegister double_scratch2,
+                                   Register temp1,
+                                   Register temp2,
+                                   Register temp3) {
+  ASSERT(!input.is(result));
+  ASSERT(!input.is(double_scratch1));
+  ASSERT(!input.is(double_scratch2));
+  ASSERT(!result.is(double_scratch1));
+  ASSERT(!result.is(double_scratch2));
+  ASSERT(!double_scratch1.is(double_scratch2));
+  ASSERT(!temp1.is(temp2));
+  ASSERT(!temp1.is(temp3));
+  ASSERT(!temp2.is(temp3));
+  ASSERT(ExternalReference::math_exp_constants(0).address() != NULL);
+
+  Label done;
+
+  __ mov(temp3, Operand(ExternalReference::math_exp_constants(0)));
+
+  __ vldr(double_scratch1, ExpConstant(0, temp3));
+  __ vmov(result, kDoubleRegZero);
+  __ VFPCompareAndSetFlags(double_scratch1, input);
+  __ b(ge, &done);
+  __ vldr(double_scratch2, ExpConstant(1, temp3));
+  __ VFPCompareAndSetFlags(input, double_scratch2);
+  __ vldr(result, ExpConstant(2, temp3));
+  __ b(ge, &done);
+  __ vldr(double_scratch1, ExpConstant(3, temp3));
+  __ vldr(result, ExpConstant(4, temp3));
+  __ vmul(double_scratch1, double_scratch1, input);
+  __ vadd(double_scratch1, double_scratch1, result);
+  __ vmov(temp2, temp1, double_scratch1);
+  __ vsub(double_scratch1, double_scratch1, result);
+  __ vldr(result, ExpConstant(6, temp3));
+  __ vldr(double_scratch2, ExpConstant(5, temp3));
+  __ vmul(double_scratch1, double_scratch1, double_scratch2);
+  __ vsub(double_scratch1, double_scratch1, input);
+  __ vsub(result, result, double_scratch1);
+  __ vmul(input, double_scratch1, double_scratch1);
+  __ vmul(result, result, input);
+  __ mov(temp1, Operand(temp2, LSR, 11));
+  __ vldr(double_scratch2, ExpConstant(7, temp3));
+  __ vmul(result, result, double_scratch2);
+  __ vsub(result, result, double_scratch1);
+  __ vldr(double_scratch2, ExpConstant(8, temp3));
+  __ vadd(result, result, double_scratch2);
+// roohack  __ movw(ip, 0x7ff);
+  __ and_(temp2, temp2, Operand(ip));
+  __ add(temp1, temp1, Operand(0x3ff));
+  __ mov(temp1, Operand(temp1, LSL, 20));
+
+  // Must not call ExpConstant() after overwriting temp3!
+  __ mov(temp3, Operand(ExternalReference::math_exp_log_table()));
+  __ ldr(ip, MemOperand(temp3, temp2, LSL, 3));
+  __ add(temp3, temp3, Operand(kPointerSize));
+  __ ldr(temp2, MemOperand(temp3, temp2, LSL, 3));
+  __ orr(temp1, temp1, temp2);
+  __ vmov(input, ip, temp1);
+  __ vmul(result, result, input);
   __ bind(&done);
 }
 

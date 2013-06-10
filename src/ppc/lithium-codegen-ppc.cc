@@ -1537,6 +1537,7 @@ void LCodeGen::DoDivI(LDivI* instr) {
 
 
 void LCodeGen::DoMultiplyAddD(LMultiplyAddD* instr) {
+#if 0
   DwVfpRegister addend = ToDoubleRegister(instr->addend());
   DwVfpRegister multiplier = ToDoubleRegister(instr->multiplier());
   DwVfpRegister multiplicand = ToDoubleRegister(instr->multiplicand());
@@ -1545,10 +1546,14 @@ void LCodeGen::DoMultiplyAddD(LMultiplyAddD* instr) {
   ASSERT(addend.is(ToDoubleRegister(instr->result())));
 
   __ vmla(addend, multiplier, multiplicand);
+#else
+  __ fake_asm(fMASM29);
+#endif
 }
 
 
 void LCodeGen::DoMultiplySubD(LMultiplySubD* instr) {
+#if 0
   DwVfpRegister minuend = ToDoubleRegister(instr->minuend());
   DwVfpRegister multiplier = ToDoubleRegister(instr->multiplier());
   DwVfpRegister multiplicand = ToDoubleRegister(instr->multiplicand());
@@ -1557,10 +1562,14 @@ void LCodeGen::DoMultiplySubD(LMultiplySubD* instr) {
   ASSERT(minuend.is(ToDoubleRegister(instr->result())));
 
   __ vmls(minuend, multiplier, multiplicand);
+#else
+  __ fake_asm(fMASM30);
+#endif
 }
 
 
 void LCodeGen::DoMathFloorOfDiv(LMathFloorOfDiv* instr) {
+#if 0
   const Register result = ToRegister(instr->result());
   const Register left = ToRegister(instr->left());
   const Register remainder = ToRegister(instr->temp());
@@ -1628,6 +1637,9 @@ void LCodeGen::DoMathFloorOfDiv(LMathFloorOfDiv* instr) {
 
     __ bind(&done);
   }
+#else
+    __ fake_asm(fMASM31);
+#endif
 }
 
 
@@ -3326,8 +3338,12 @@ void LCodeGen::DoLoadKeyedExternalArray(LLoadKeyed* instr) {
         : Operand(key, LSL, shift_size);
     __ add(scratch0(), external_pointer, operand);
     if (elements_kind == EXTERNAL_FLOAT_ELEMENTS) {
+#if 0
       __ vldr(kScratchDoubleReg.low(), scratch0(), additional_offset);
       __ vcvt_f64_f32(result, kScratchDoubleReg.low());
+#else
+      __ fake_asm(fMASM32);
+#endif
     } else  {  // i.e. elements_kind == EXTERNAL_DOUBLE_ELEMENTS
       __ vldr(result, scratch0(), additional_offset);
     }
@@ -3432,7 +3448,11 @@ void LCodeGen::DoLoadKeyedFixedArray(LLoadKeyed* instr) {
     // during bound check elimination with the index argument to the bounds
     // check, which can be tagged, so that case must be handled here, too.
     if (instr->hydrogen()->key()->representation().IsSmi()) {
+#if 0
       __ add(scratch, elements, Operand::PointerOffsetFromSmiKey(key));
+#else
+      __ fake_asm(fMASM33);
+#endif
     } else {
       __ add(scratch, elements, Operand(key, LSL, kPointerSizeLog2));
     }
@@ -3890,6 +3910,7 @@ void LCodeGen::DoMathAbs(LMathAbs* instr) {
 
 
 void LCodeGen::DoMathFloor(LMathFloor* instr) {
+#if 0
   DwVfpRegister input = ToDoubleRegister(instr->value());
   Register result = ToRegister(instr->result());
   Register input_high = scratch0();
@@ -3908,10 +3929,14 @@ void LCodeGen::DoMathFloor(LMathFloor* instr) {
     DeoptimizeIf(mi, instr->environment());
   }
   __ bind(&done);
+#else
+  __ fake_asm(fMASM34);
+#endif
 }
 
 
 void LCodeGen::DoMathRound(LMathRound* instr) {
+#if 0
   DwVfpRegister input = ToDoubleRegister(instr->value());
   Register result = ToRegister(instr->result());
   DwVfpRegister double_scratch1 = ToDoubleRegister(instr->temp());
@@ -3947,6 +3972,9 @@ void LCodeGen::DoMathRound(LMathRound* instr) {
                    &done, &done);
   DeoptimizeIf(al, instr->environment());
   __ bind(&done);
+#else
+  __ fake_asm(fMASM35);
+#endif
 }
 
 
@@ -4415,8 +4443,12 @@ void LCodeGen::DoStoreKeyedExternalArray(LStoreKeyed* instr) {
                     : Operand(key, LSL, shift_size));
     __ add(scratch0(), external_pointer, operand);
     if (elements_kind == EXTERNAL_FLOAT_ELEMENTS) {
+#if 0
       __ vcvt_f32_f64(double_scratch0().low(), value);
       __ vstr(double_scratch0().low(), scratch0(), additional_offset);
+#else
+    __ fake_asm(fMASM36);
+#endif
     } else {  // i.e. elements_kind == EXTERNAL_DOUBLE_ELEMENTS
       __ vstr(value, scratch0(), additional_offset);
     }
@@ -4487,7 +4519,7 @@ void LCodeGen::DoStoreKeyedFixedDoubleArray(LStoreKeyed* instr) {
     __ add(scratch, scratch,
            Operand(FixedDoubleArray::kHeaderSize - kHeapObjectTag));
   }
-
+#if 0
   if (instr->NeedsCanonicalization()) {
     // Force a canonical NaN.
     if (masm()->emit_debug_code()) {
@@ -4497,6 +4529,9 @@ void LCodeGen::DoStoreKeyedFixedDoubleArray(LStoreKeyed* instr) {
     }
     __ VFPCanonicalizeNaN(value);
   }
+#else
+ __ fake_asm(fMASM37);
+#endif
   __ vstr(value, scratch, instr->additional_index() << element_size_shift);
 }
 
@@ -4523,7 +4558,11 @@ void LCodeGen::DoStoreKeyedFixedArray(LStoreKeyed* instr) {
     // during bound check elimination with the index argument to the bounds
     // check, which can be tagged, so that case must be handled here, too.
     if (instr->hydrogen()->key()->representation().IsSmi()) {
+#if 0
       __ add(scratch, elements, Operand::PointerOffsetFromSmiKey(key));
+#else
+   __ fake_asm(fMASM38);
+#endif
     } else {
       __ add(scratch, elements, Operand(key, LSL, kPointerSizeLog2));
     }
@@ -4945,7 +4984,11 @@ void LCodeGen::DoNumberTagD(LNumberTagD* instr) {
     __ vmov(scratch, input_reg.high());
     __ cmp(scratch, Operand(kHoleNanUpper32));
     // If not the hole NaN, force the NaN to be canonical.
+#if 0
     __ VFPCanonicalizeNaN(input_reg, ne);
+#else
+    __ fake_asm(fMASM39);
+#endif
     __ b(ne, &no_special_nan_handling);
     __ Move(reg, factory()->the_hole_value());
     __ b(&done);
@@ -5080,6 +5123,7 @@ void LCodeGen::EmitNumberUntagD(Register input_reg,
 
 
 void LCodeGen::DoDeferredTaggedToI(LTaggedToI* instr) {
+#if 0
   Register input_reg = ToRegister(instr->value());
   Register scratch1 = scratch0();
   Register scratch2 = ToRegister(instr->temp());
@@ -5144,6 +5188,9 @@ void LCodeGen::DoDeferredTaggedToI(LTaggedToI* instr) {
     }
   }
   __ bind(&done);
+#else
+    __ fake_asm(fMASM40);
+#endif
 }
 
 
@@ -5207,6 +5254,7 @@ void LCodeGen::DoNumberUntagD(LNumberUntagD* instr) {
 
 
 void LCodeGen::DoDoubleToI(LDoubleToI* instr) {
+#if 0
   Register result_reg = ToRegister(instr->result());
   Register scratch1 = scratch0();
   Register scratch2 = ToRegister(instr->temp());
@@ -5231,10 +5279,14 @@ void LCodeGen::DoDoubleToI(LDoubleToI* instr) {
       __ bind(&done);
     }
   }
+#else
+  __ fake_asm(fMASM41);
+#endif
 }
 
 
 void LCodeGen::DoDoubleToSmi(LDoubleToSmi* instr) {
+#if 0
   Register result_reg = ToRegister(instr->result());
   Register scratch1 = scratch0();
   Register scratch2 = ToRegister(instr->temp());
@@ -5261,6 +5313,9 @@ void LCodeGen::DoDoubleToSmi(LDoubleToSmi* instr) {
   }
   __ SmiTag(result_reg, SetCC);
   DeoptimizeIf(vs, instr->environment());
+#else
+  __ fake_asm(fMASM42);
+#endif
 }
 
 
@@ -5568,8 +5623,7 @@ void LCodeGen::DoRegExpLiteral(LRegExpLiteral* instr) {
 
   __ bind(&allocated);
   // Copy the content into the newly allocated memory.
-  __ CopyFields(r0, r1, double_scratch0(), double_scratch0().low(),
-                size / kPointerSize);
+  __ CopyFields(r0, r1, r3.bit(), size / kPointerSize);
 }
 
 
@@ -5938,6 +5992,7 @@ void LCodeGen::DoCheckMapValue(LCheckMapValue* instr) {
 
 
 void LCodeGen::DoLoadFieldByIndex(LLoadFieldByIndex* instr) {
+#if 0
   Register object = ToRegister(instr->object());
   Register index = ToRegister(instr->index());
   Register result = ToRegister(instr->result());
@@ -5960,6 +6015,9 @@ void LCodeGen::DoLoadFieldByIndex(LLoadFieldByIndex* instr) {
   __ ldr(result, FieldMemOperand(scratch,
                                  FixedArray::kHeaderSize - kPointerSize));
   __ bind(&done);
+#else
+  __ fake_asm(fMASM43);
+#endif
 }
 
 

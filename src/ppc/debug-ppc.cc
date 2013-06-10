@@ -145,7 +145,7 @@ static void Generate_DebugBreakCallHelper(MacroAssembler* masm,
             __ tst(reg, Operand(0xc0000000));
             __ Assert(eq, "Unable to encode value as smi");
           }
-          __ mov(reg, Operand(reg, LSL, kSmiTagSize));
+          __ SmiTag(reg);
         }
       }
       __ stm(db_w, sp, object_regs | non_object_regs);
@@ -154,7 +154,7 @@ static void Generate_DebugBreakCallHelper(MacroAssembler* masm,
 #ifdef DEBUG
     __ RecordComment("// Calling from debug break to runtime - come in - over");
 #endif
-    __ mov(r3, Operand(0, RelocInfo::NONE));  // no arguments
+    __ mov(r3, Operand::Zero());  // no arguments
     __ mov(r4, Operand(ExternalReference::debug_break(masm->isolate())));
 
     CEntryStub ceb(1);
@@ -167,7 +167,7 @@ static void Generate_DebugBreakCallHelper(MacroAssembler* masm,
         int r = JSCallerSavedCode(i);
         Register reg = { r };
         if ((non_object_regs & (1 << r)) != 0) {
-          __ mov(reg, Operand(reg, LSR, kSmiTagSize));
+          __ SmiUntag(reg);
         }
         if (FLAG_debug_code &&
             (((object_regs |non_object_regs) & (1 << r)) == 0)) {
@@ -236,6 +236,13 @@ void Debug::GenerateKeyedStoreICDebugBreak(MacroAssembler* masm) {
   Generate_DebugBreakCallHelper(masm, r3.bit() | r4.bit() | r5.bit(), 0);
 }
 
+void Debug::GenerateCompareNilICDebugBreak(MacroAssembler* masm) {
+  // Register state for CompareNil IC
+  // ----------- S t a t e -------------
+  //  -- r3    : value
+  // -----------------------------------
+  Generate_DebugBreakCallHelper(masm, r3.bit(), 0);
+}
 
 void Debug::GenerateCallICDebugBreak(MacroAssembler* masm) {
   // Calling convention for IC call (from ic-arm.cc)

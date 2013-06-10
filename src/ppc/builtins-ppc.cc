@@ -127,12 +127,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   if (initial_capacity > 0) {
     size += FixedArray::SizeFor(initial_capacity);
   }
-  __ AllocateInNewSpace(size,
-                        result,
-                        scratch2,
-                        scratch3,
-                        gc_required,
-                        TAG_OBJECT);
+  __ Allocate(size, result, scratch2, scratch3, gc_required, TAG_OBJECT);
 
   // Allocated the JSArray. Now initialize the fields except for the elements
   // array.
@@ -143,7 +138,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   __ LoadRoot(scratch1, Heap::kEmptyFixedArrayRootIndex);
   __ stw(scratch1, FieldMemOperand(result, JSArray::kPropertiesOffset));
   // Field JSArray::kElementsOffset is initialized later.
-  __ li(scratch3,  Operand(0, RelocInfo::NONE));
+  __ li(scratch3, Operand::Zero());
   __ stw(scratch3, FieldMemOperand(result, JSArray::kLengthOffset));
 
   if (initial_capacity == 0) {
@@ -230,15 +225,14 @@ static void AllocateJSArray(MacroAssembler* masm,
   STATIC_ASSERT(kSmiTagSize == 1 && kSmiTag == 0);
   __ li(elements_array_end,
          Operand((JSArray::kSize + FixedArray::kHeaderSize) / kPointerSize));
-  __ srawi(scratch1, array_size, kSmiTagSize);
+  __ srawi(scratch1, array_size, kSmiTagSize);  // could be SmiUntag?
   __ add(elements_array_end, elements_array_end, scratch1);
-  __ AllocateInNewSpace(
-      elements_array_end,
-      result,
-      scratch1,
-      scratch2,
-      gc_required,
-      static_cast<AllocationFlags>(TAG_OBJECT | SIZE_IN_WORDS));
+  __ Allocate(elements_array_end,
+              result,
+              scratch1,
+              scratch2,
+              gc_required,
+              static_cast<AllocationFlags>(TAG_OBJECT | SIZE_IN_WORDS));
 
   // Allocated the JSArray. Now initialize the fields except for the elements
   // array.
@@ -319,14 +313,13 @@ static void AllocateJSArray(MacroAssembler* masm,
 // entering the generic code. In both cases argc in r0 needs to be preserved.
 // Both registers are preserved by this code so no need to differentiate between
 // construct call and normal call.
-static void ArrayNativeCode(MacroAssembler* masm,
-                            Label* call_generic_code) {
+void ArrayNativeCode(MacroAssembler* masm, Label* call_generic_code) {
   Counters* counters = masm->isolate()->counters();
   Label argc_one_or_more, argc_two_or_more, not_empty_array, empty_array,
       has_non_smi_element, finish, cant_transition_map, not_double;
 
   // Check for array construction with zero arguments or one.
-  __ cmpi(r3, Operand(0, RelocInfo::NONE));
+  __ cmpi(r3, Operand::Zero());
   __ bne(&argc_one_or_more);
 
   // Handle construction of an empty array.
@@ -393,7 +386,7 @@ static void ArrayNativeCode(MacroAssembler* masm,
 
   // Handle construction of an array from a list of arguments.
   __ bind(&argc_two_or_more);
-  __ slwi(r5, r3, Operand(kSmiTagSize));  // Convet argc to a smi.
+  __ SmiTag(r5, r3);
 
   // r3: argc
   // r4: constructor
@@ -499,7 +492,7 @@ void Builtins::Generate_InternalArrayCode(MacroAssembler* masm) {
     // Initial map for the builtin InternalArray functions should be maps.
     __ lwz(r5, FieldMemOperand(r4, JSFunction::kPrototypeOrInitialMapOffset));
     STATIC_ASSERT(kSmiTagMask < 0x8000);
-    __ andi(r0, r5, Operand(kSmiTagMask));
+    __ andi(r0, r5, Operand(kSmiTagMask));  // could be SmiTst?
     __ cmpi(r0, Operand(0));
     __ Assert(ne, "Unexpected initial map for InternalArray function");
     __ CompareObjectType(r5, r6, r7, MAP_TYPE);
@@ -508,15 +501,20 @@ void Builtins::Generate_InternalArrayCode(MacroAssembler* masm) {
 
   // Run the native code for the InternalArray function called as a normal
   // function.
-  ArrayNativeCode(masm, &generic_array_code);
+  if (FLAG_optimize_constructed_arrays) {
+    // tail call a stub
+    InternalArrayConstructorStub stub(masm->isolate());
+    __ TailCallStub(&stub);
+  } else {
+    ArrayNativeCode(masm, &generic_array_code);
 
-  // Jump to the generic array code if the specialized code cannot handle the
-  // construction.
-  __ bind(&generic_array_code);
-
-  Handle<Code> array_code =
-      masm->isolate()->builtins()->InternalArrayCodeGeneric();
-  __ Jump(array_code, RelocInfo::CODE_TARGET);
+    // Jump to the generic array code if the specialized code cannot handle the
+    // construction.
+    __ bind(&generic_array_code);
+    Handle<Code> array_code =
+        masm->isolate()->builtins()->InternalArrayCodeGeneric();
+    __ Jump(array_code, RelocInfo::CODE_TARGET);
+  }
 }
 
 
@@ -535,7 +533,7 @@ void Builtins::Generate_ArrayCode(MacroAssembler* masm) {
     // Initial map for the builtin Array functions should be maps.
     __ lwz(r5, FieldMemOperand(r4, JSFunction::kPrototypeOrInitialMapOffset));
     STATIC_ASSERT(kSmiTagMask < 0x8000);
-    __ andi(r0, r5, Operand(kSmiTagMask));
+    __ andi(r0, r5, Operand(kSmiTagMask));  // could be SmiTst?
     __ cmpi(r0, Operand(0));
     __ Assert(ne, "Unexpected initial map for Array function");
     __ CompareObjectType(r5, r6, r7, MAP_TYPE);
@@ -543,39 +541,48 @@ void Builtins::Generate_ArrayCode(MacroAssembler* masm) {
   }
 
   // Run the native code for the Array function called as a normal function.
-  ArrayNativeCode(masm, &generic_array_code);
+  if (FLAG_optimize_constructed_arrays) {
+    // tail call a stub
+    Handle<Object> undefined_sentinel(
+        masm->isolate()->heap()->undefined_value(),
+        masm->isolate());
+    __ mov(r2, Operand(undefined_sentinel));
+    ArrayConstructorStub stub(masm->isolate());
+    __ TailCallStub(&stub);
+  } else {
+    ArrayNativeCode(masm, &generic_array_code);
 
-  // Jump to the generic array code if the specialized code cannot handle
-  // the construction.
-  __ bind(&generic_array_code);
-
-  Handle<Code> array_code =
-      masm->isolate()->builtins()->ArrayCodeGeneric();
-  __ Jump(array_code, RelocInfo::CODE_TARGET);
+    // Jump to the generic array code if the specialized code cannot handle
+    // the construction.
+    __ bind(&generic_array_code);
+    Handle<Code> array_code =
+        masm->isolate()->builtins()->ArrayCodeGeneric();
+    __ Jump(array_code, RelocInfo::CODE_TARGET);
+  }
 }
 
 
-void Builtins::Generate_ArrayConstructCode(MacroAssembler* masm) {
+void Builtins::Generate_CommonArrayConstructCode(MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- r3     : number of arguments
   //  -- r4     : constructor function
+  //  -- r5     : type info cell
   //  -- lr     : return address
   //  -- sp[...]: constructor arguments
   // -----------------------------------
-  Label generic_constructor;
 
   if (FLAG_debug_code) {
     // The array construct code is only set for the builtin and internal
     // Array functions which always have a map.
     // Initial map for the builtin Array function should be a map.
-    __ lwz(r5, FieldMemOperand(r4, JSFunction::kPrototypeOrInitialMapOffset));
-    __ andi(r0, r5, Operand(kSmiTagMask));
+    __ lwz(r6, FieldMemOperand(r4, JSFunction::kPrototypeOrInitialMapOffset));
+    __ andi(r0, r6, Operand(kSmiTagMask));  // could be SmiTst?
     __ cmpi(r0, Operand(0));
     __ Assert(ne, "Unexpected initial map for Array function");
-    __ CompareObjectType(r5, r6, r7, MAP_TYPE);
+    __ CompareObjectType(r6, r6, r7, MAP_TYPE);
     __ Assert(eq, "Unexpected initial map for Array function");
   }
-
+  Label generic_constructor;
   // Run the native code for the Array function called as a constructor.
   ArrayNativeCode(masm, &generic_constructor);
 
@@ -608,7 +615,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
 
   // Load the first arguments in r3 and get rid of the rest.
   Label no_arguments;
-  __ cmpi(r3, Operand(0, RelocInfo::NONE));
+  __ cmpi(r3, Operand::Zero());
   __ beq(&no_arguments);
   // First args = sp[(argc - 1) * 4].
   __ sub(r3, r3, Operand(1));
@@ -639,12 +646,12 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   // -----------------------------------
 
   Label gc_required;
-  __ AllocateInNewSpace(JSValue::kSize,
-                        r3,  // Result.
-                        r6,  // Scratch.
-                        r7,  // Scratch.
-                        &gc_required,
-                        TAG_OBJECT);
+  __ Allocate(JSValue::kSize,
+              r3,  // Result.
+              r6,  // Scratch.
+              r7,  // Scratch.
+              &gc_required,
+              TAG_OBJECT);
 
   // Initialising the String Object.
   Register map = r6;
@@ -654,7 +661,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
     __ cmpi(r7, Operand(JSValue::kSize >> kPointerSizeLog2));
     __ Assert(eq, "Unexpected string wrapper instance size");
     __ lbz(r7, FieldMemOperand(map, Map::kUnusedPropertyFieldsOffset));
-    __ cmpi(r7, Operand(0, RelocInfo::NONE));
+    __ cmpi(r7, Operand::Zero());
     __ Assert(eq, "Unexpected unused properties of string wrapper");
   }
   __ stw(map, FieldMemOperand(r3, HeapObject::kMapOffset));
@@ -703,7 +710,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   // Load the empty string into r5, remove the receiver from the
   // stack, and jump back to the case where the argument is a string.
   __ bind(&no_arguments);
-  __ LoadRoot(argument, Heap::kEmptyStringRootIndex);
+  __ LoadRoot(argument, Heap::kempty_stringRootIndex);
   __ Drop(1);
   __ b(&argument_is_string);
 
@@ -731,6 +738,35 @@ static void GenerateTailCallToSharedCode(MacroAssembler* masm) {
 
 void Builtins::Generate_InRecompileQueue(MacroAssembler* masm) {
   GenerateTailCallToSharedCode(masm);
+}
+
+
+void Builtins::Generate_InstallRecompiledCode(MacroAssembler* masm) {
+  // Enter an internal frame.
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+
+    // Preserve the function.
+    __ push(r4);
+    // Push call kind information.
+    __ push(r8);
+
+    // Push the function on the stack as the argument to the runtime function.
+    __ push(r4);
+    __ CallRuntime(Runtime::kInstallRecompiledCode, 1);
+    // Calculate the entry point.
+    __ add(r5, r3, Operand(Code::kHeaderSize - kHeapObjectTag));
+
+    // Restore call kind information.
+    __ pop(r8);
+    // Restore saved function.
+    __ pop(r4);
+
+    // Tear down internal frame.
+  }
+
+  // Do a tail-call of the compiled function.
+  __ Jump(r5);
 }
 
 
@@ -778,7 +814,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     FrameScope scope(masm, StackFrame::CONSTRUCT);
 
     // Preserve the two incoming parameters on the stack.
-    __ slwi(r3, r3, Operand(kSmiTagSize));
+    __ SmiTag(r3);
     __ push(r3);  // Smi-tagged arguments count.
     __ push(r4);  // Constructor function.
 
@@ -840,7 +876,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // r4: constructor function
       // r5: initial map
       __ lbz(r6, FieldMemOperand(r5, Map::kInstanceSizeOffset));
-      __ AllocateInNewSpace(r6, r7, r8, r9, &rt_call, SIZE_IN_WORDS);
+      __ Allocate(r6, r7, r8, r9, &rt_call, SIZE_IN_WORDS);
 
       // Allocated the JSObject, now initialize the fields. Map is set to
       // initial map and properties and elements are set to empty fixed array.
@@ -936,7 +972,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // r7: JSObject
       // r8: start of next object
       __ add(r3, r6, Operand(FixedArray::kHeaderSize / kPointerSize));
-      __ AllocateInNewSpace(
+      __ Allocate(
           r3,
           r8,
           r9,
@@ -955,7 +991,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       __ stw(r9, MemOperand(r5));
       __ add(r5, r5, Operand(kPointerSize));
       ASSERT_EQ(1 * kPointerSize, FixedArray::kLengthOffset);
-      __ slwi(r3, r6, Operand(kSmiTagSize));
+      __ SmiTag(r3, r6);
       __ stw(r3, MemOperand(r5));
       __ add(r5, r5, Operand(kPointerSize));
 
@@ -1031,7 +1067,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     __ add(r5, fp, Operand(StandardFrameConstants::kCallerSPOffset));
 
     // Set up number of arguments for function call below
-    __ srwi(r3, r6, Operand(kSmiTagSize));
+    __ SmiUntag(r3, r6);
 
     // Copy arguments and receiver to the expression stack.
     // r3: number of arguments
@@ -1099,7 +1135,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
 
     // If the type of the result (stored in its map) is less than
     // FIRST_SPEC_OBJECT_TYPE, it is not an object in the ECMA sense.
-    __ CompareObjectType(r3, r6, r6, FIRST_SPEC_OBJECT_TYPE);
+    __ CompareObjectType(r3, r4, r6, FIRST_SPEC_OBJECT_TYPE);
     __ bge(&exit);
 
     // Throw away the result of the constructor invocation and use the
@@ -1153,7 +1189,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
   // r0,r8-r9, cp may be clobbered
 
   // Clear the context before we push it when entering the internal frame.
-  __ li(cp, Operand(0, RelocInfo::NONE));
+  __ li(cp, Operand::Zero());
 
   // Enter an internal frame.
   {
@@ -1197,6 +1233,10 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
     // Invoke the code and pass argc as r3.
     __ mr(r3, r6);
     if (is_construct) {
+      // No type feedback cell is available
+      Handle<Object> undefined_sentinel(
+          masm->isolate()->heap()->undefined_value(), masm->isolate());
+      __ mov(r2, Operand(undefined_sentinel));
       CallConstructStub stub(NO_CALL_FUNCTION_FLAGS);
       __ CallStub(&stub);
     } else {
@@ -1282,6 +1322,59 @@ void Builtins::Generate_LazyRecompile(MacroAssembler* masm) {
 }
 
 
+static void GenerateMakeCodeYoungAgainCommon(MacroAssembler* masm) {
+  // For now, we are relying on the fact that make_code_young doesn't do any
+  // garbage collection which allows us to save/restore the registers without
+  // worrying about which of them contain pointers. We also don't build an
+  // internal frame to make the code faster, since we shouldn't have to do stack
+  // crawls in MakeCodeYoung. This seems a bit fragile.
+
+  // The following registers must be saved and restored when calling through to
+  // the runtime:
+  //   r3 - contains return address (beginning of patch sequence)
+  //   r4 - function object
+  FrameScope scope(masm, StackFrame::MANUAL);
+  __ mflr(r0);
+  __ MultiPush(r3.bit() | r4.bit() | r11.bit() | r0.bit());
+  __ PrepareCallCFunction(1, 0, r4);
+  __ CallCFunction(
+      ExternalReference::get_make_code_young_function(masm->isolate()), 1);
+  __ MultiPop(r3.bit() | r4.bit() | r11.bit() | r0.bit());
+  __ mtlr(r0);
+  __ blr();
+}
+
+#define DEFINE_CODE_AGE_BUILTIN_GENERATOR(C)                 \
+void Builtins::Generate_Make##C##CodeYoungAgainEvenMarking(  \
+    MacroAssembler* masm) {                                  \
+  GenerateMakeCodeYoungAgainCommon(masm);                    \
+}                                                            \
+void Builtins::Generate_Make##C##CodeYoungAgainOddMarking(   \
+    MacroAssembler* masm) {                                  \
+  GenerateMakeCodeYoungAgainCommon(masm);                    \
+}
+CODE_AGE_LIST(DEFINE_CODE_AGE_BUILTIN_GENERATOR)
+#undef DEFINE_CODE_AGE_BUILTIN_GENERATOR
+
+
+void Builtins::Generate_NotifyStubFailure(MacroAssembler* masm) {
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+
+    // Preserve registers across notification, this is important for compiled
+    // stubs that tail call the runtime on deopts passing their parameters in
+    // registers.
+    __ MultiPush(kJSCallerSaved | kCalleeSaved);
+    // Pass the function and deoptimization type to the runtime system.
+    __ CallRuntime(Runtime::kNotifyStubFailure, 0);
+    __ MultiPop(kJSCallerSaved | kCalleeSaved);
+  }
+
+  __ add(sp, sp, Operand(kPointerSize));  // Ignore state
+  __ blr();  // Jump to miss handler
+}
+
+
 static void Generate_NotifyDeoptimizedHelper(MacroAssembler* masm,
                                              Deoptimizer::BailoutType type) {
   {
@@ -1319,6 +1412,11 @@ void Builtins::Generate_NotifyDeoptimized(MacroAssembler* masm) {
 }
 
 
+void Builtins::Generate_NotifySoftDeoptimized(MacroAssembler* masm) {
+  Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::SOFT);
+}
+
+
 void Builtins::Generate_NotifyLazyDeoptimized(MacroAssembler* masm) {
   Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::LAZY);
 }
@@ -1340,12 +1438,6 @@ void Builtins::Generate_NotifyOSR(MacroAssembler* masm) {
 
 
 void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
-  CpuFeatures::TryForceFeatureScope scope(VFP3);
-  if (!CPU::SupportsCrankshaft()) {
-    __ Abort("Unreachable code: Cannot optimize without VFP3 support.");
-    return;
-  }
-
   // Lookup the function in the JavaScript frame and push it as an
   // argument to the on-stack replacement function.
   __ lwz(r3, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
@@ -1378,7 +1470,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   // 1. Make sure we have at least one argument.
   // r3: actual number of arguments
   { Label done;
-    __ cmpi(r3, Operand(0));
+    __ cmpi(r3, Operand::Zero());
     __ bne(&done);
     __ LoadRoot(r5, Heap::kUndefinedValueRootIndex);
     __ push(r5);
@@ -1401,7 +1493,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   // r3: actual number of arguments
   // r4: function
   Label shift_arguments;
-  __ li(r7, Operand(0, RelocInfo::NONE));  // indicate regular JS_FUNCTION
+  __ li(r7, Operand::Zero());  // indicate regular JS_FUNCTION
   { Label convert_to_object, use_global_receiver, patch_receiver;
     // Change context eagerly in case we need the global receiver.
     __ lwz(cp, FieldMemOperand(r4, JSFunction::kContextOffset));
@@ -1445,7 +1537,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     {
       // Enter an internal frame in order to preserve argument count.
       FrameScope scope(masm, StackFrame::INTERNAL);
-      __ slwi(r3, r3, Operand(kSmiTagSize));  // Smi-tagged.
+      __ SmiTag(r3);
       __ push(r3);
 
       __ push(r5);
@@ -1453,7 +1545,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
       __ mov(r5, r3);
 
       __ pop(r3);
-      __ srawi(r3, r3, kSmiTagSize);
+      __ SmiUntag(r3);
 
       // Exit the internal frame.
     }
@@ -1462,7 +1554,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     __ slwi(r7, r3, Operand(kPointerSizeLog2));
     __ add(r7, sp, r7);
     __ lwz(r4, MemOperand(r7));
-    __ li(r7, Operand(0, RelocInfo::NONE));
+    __ li(r7, Operand::Zero());
     __ jmp(&patch_receiver);
 
     // Use the global receiver object from the called function as the
@@ -1485,11 +1577,11 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
 
   // 3b. Check for function proxy.
   __ bind(&slow);
-  __ li(r7, Operand(1, RelocInfo::NONE));  // indicate function proxy
+  __ li(r7, Operand(1, RelocInfo::NONE32));  // indicate function proxy
   __ cmpi(r5, Operand(JS_FUNCTION_PROXY_TYPE));
   __ beq(&shift_arguments);
   __ bind(&non_function);
-  __ li(r7, Operand(2, RelocInfo::NONE));  // indicate non-function
+  __ li(r7, Operand(2, RelocInfo::NONE32));  // indicate non-function
 
   // 3c. Patch the first argument when calling a non-function.  The
   //     CALL_NON_FUNCTION builtin expects the non-function callee as
@@ -1535,7 +1627,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     __ cmpi(r7, Operand(0));
     __ beq(&function);
     // Expected number of arguments is 0 for CALL_NON_FUNCTION.
-    __ li(r5, Operand(0, RelocInfo::NONE));
+    __ li(r5, Operand::Zero());
     __ SetCallKind(r8, CALL_AS_METHOD);
     __ cmpi(r7, Operand(1));
     __ bne(&non_proxy);
@@ -1561,7 +1653,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   __ lwz(r6, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
   __ lwz(r5,
          FieldMemOperand(r6, SharedFunctionInfo::kFormalParameterCountOffset));
-  __ srawi(r5, r5, kSmiTagSize);
+  __ SmiUntag(r5);
   __ lwz(r6, FieldMemOperand(r4, JSFunction::kCodeEntryOffset));
   __ SetCallKind(r8, CALL_AS_METHOD);
   __ cmp(r5, r3);  // Check formal and actual parameter counts.
@@ -1616,7 +1708,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     // Push current limit and index.
     __ bind(&okay);
     __ push(r3);  // limit
-    __ li(r4, Operand(0, RelocInfo::NONE));  // initial index
+    __ li(r4, Operand::Zero());  // initial index
     __ push(r4);
 
     // Get the receiver.
@@ -1715,7 +1807,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     // Invoke the function.
     Label call_proxy;
     ParameterCount actual(r3);
-    __ srawi(r3, r3, kSmiTagSize);
+    __ SmiUntag(r3);
     __ lwz(r4, MemOperand(fp, kFunctionOffset));
     __ CompareObjectType(r4, r5, r5, JS_FUNCTION_TYPE);
     __ bne(&call_proxy);
@@ -1730,7 +1822,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     __ bind(&call_proxy);
     __ push(r4);  // add function proxy as last argument
     __ add(r3, r3, Operand(1));
-    __ li(r5, Operand(0, RelocInfo::NONE));
+    __ li(r5, Operand::Zero());
     __ SetCallKind(r8, CALL_AS_METHOD);
     __ GetBuiltinEntry(r6, Builtins::CALL_FUNCTION_PROXY);
     __ Call(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
@@ -1744,7 +1836,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
 
 
 static void EnterArgumentsAdaptorFrame(MacroAssembler* masm) {
-  __ slwi(r3, r3, Operand(kSmiTagSize));
+  __ SmiTag(r3);
   __ li(r7, Operand(Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR)));
   __ mflr(r0);
   __ push(r0);

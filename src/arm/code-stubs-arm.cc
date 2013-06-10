@@ -5908,9 +5908,9 @@ void StringAddStub::Generate(MacroAssembler* masm) {
   __ mov(r6, Operand(2));
   __ AllocateAsciiString(r0, r6, r4, r5, r9, &call_runtime);
 #if V8_HOST_ARCH_PPC  // Really we mean BIG ENDIAN host
-  __ strb(r2, FieldMemOperand(r0, SeqAsciiString::kHeaderSize));
+  __ strb(r2, FieldMemOperand(r0, SeqOneByteString::kHeaderSize));
   __ mov(r2, Operand(r2, LSR, 8));
-  __ strb(r2, FieldMemOperand(r0, SeqAsciiString::kHeaderSize+1));
+  __ strb(r2, FieldMemOperand(r0, SeqOneByteString::kHeaderSize+1));
 #else  // LITTLE ENDIAN host
   __ strh(r2, FieldMemOperand(r0, SeqOneByteString::kHeaderSize));
 #endif

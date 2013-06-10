@@ -53,8 +53,13 @@ namespace internal {
 bool CpuFeatures::initialized_ = false;
 #endif
 unsigned CpuFeatures::supported_ = 0;
-unsigned CpuFeatures::found_by_runtime_probing_ = 0;
+unsigned CpuFeatures::found_by_runtime_probing_only_ = 0;
 
+
+ExternalReference ExternalReference::cpu_features() {
+  ASSERT(CpuFeatures::initialized_);
+  return ExternalReference(&CpuFeatures::supported_);
+}
 
 // Get the CPU features enabled by the build. For cross compilation the
 // preprocessor symbols CAN_USE_ARMV7_INSTRUCTIONS and CAN_USE_VFP3_INSTRUCTIONS
@@ -63,32 +68,41 @@ unsigned CpuFeatures::found_by_runtime_probing_ = 0;
 static unsigned CpuFeaturesImpliedByCompiler() {
   unsigned answer = 0;
 #ifdef CAN_USE_ARMV7_INSTRUCTIONS
-  answer |= 1u << ARMv7;
+  if (FLAG_enable_armv7) {
+    answer |= 1u << ARMv7;
+  }
 #endif  // CAN_USE_ARMV7_INSTRUCTIONS
 #ifdef CAN_USE_VFP3_INSTRUCTIONS
-  answer |= 1u << VFP3 | 1u << VFP2 | 1u << ARMv7;
+  if (FLAG_enable_vfp3) {
+    answer |= 1u << VFP3 | 1u << ARMv7;
+  }
 #endif  // CAN_USE_VFP3_INSTRUCTIONS
-#ifdef CAN_USE_VFP2_INSTRUCTIONS
-  answer |= 1u << VFP2;
-#endif  // CAN_USE_VFP2_INSTRUCTIONS
-
-#ifdef __arm__
-  // If the compiler is allowed to use VFP then we can use VFP too in our code
-  // generation even when generating snapshots. ARMv7 and hardware floating
-  // point support implies VFPv3, see ARM DDI 0406B, page A1-6.
-#if defined(CAN_USE_ARMV7_INSTRUCTIONS) && defined(__VFP_FP__) \
-    && !defined(__SOFTFP__)
-  answer |= 1u << VFP3 | 1u << ARMv7 | 1u << VFP2;
-#endif  // defined(CAN_USE_ARMV7_INSTRUCTIONS) && defined(__VFP_FP__)
-        // && !defined(__SOFTFP__)
-#endif  // _arm__
+#ifdef CAN_USE_VFP32DREGS
+  if (FLAG_enable_32dregs) {
+    answer |= 1u << VFP32DREGS;
+  }
+#endif  // CAN_USE_VFP32DREGS
+  if ((answer & (1u << ARMv7)) && FLAG_enable_unaligned_accesses) {
+    answer |= 1u << UNALIGNED_ACCESSES;
+  }
 
   return answer;
 }
 
 
+const char* DwVfpRegister::AllocationIndexToString(int index) {
+  ASSERT(index >= 0 && index < NumAllocatableRegisters());
+  ASSERT(kScratchDoubleReg.code() - kDoubleRegZero.code() ==
+         kNumReservedRegisters - 1);
+  if (index >= kDoubleRegZero.code())
+    index += kNumReservedRegisters;
+
+  return FPRegisters::Name(index, true);
+}
+
+
 void CpuFeatures::Probe() {
-  unsigned standard_features = static_cast<unsigned>(
+  uint64_t standard_features = static_cast<unsigned>(
       OS::CpuFeaturesImpliedByPlatform()) | CpuFeaturesImpliedByCompiler();
   ASSERT(supported_ == 0 || supported_ == standard_features);
 #ifdef DEBUG
@@ -102,6 +116,8 @@ void CpuFeatures::Probe() {
 
   if (Serializer::enabled()) {
     // No probing for features if we might serialize (generate snapshot).
+    printf("   ");
+    PrintFeatures();
     return;
   }
 
@@ -109,32 +125,148 @@ void CpuFeatures::Probe() {
   // For the simulator=arm build, use VFP when FLAG_enable_vfp3 is
   // enabled. VFPv3 implies ARMv7, see ARM DDI 0406B, page A1-6.
   if (FLAG_enable_vfp3) {
-    supported_ |= 1u << VFP3 | 1u << ARMv7 | 1u << VFP2;
+    supported_ |=
+        static_cast<uint64_t>(1) << VFP3 |
+        static_cast<uint64_t>(1) << ARMv7;
   }
   // For the simulator=arm build, use ARMv7 when FLAG_enable_armv7 is enabled
   if (FLAG_enable_armv7) {
-    supported_ |= 1u << ARMv7;
+    supported_ |= static_cast<uint64_t>(1) << ARMv7;
   }
+
+  if (FLAG_enable_sudiv) {
+    supported_ |= static_cast<uint64_t>(1) << SUDIV;
+  }
+
+  if (FLAG_enable_movw_movt) {
+    supported_ |= static_cast<uint64_t>(1) << MOVW_MOVT_IMMEDIATE_LOADS;
+  }
+
+  if (FLAG_enable_32dregs) {
+    supported_ |= static_cast<uint64_t>(1) << VFP32DREGS;
+  }
+
+  if (FLAG_enable_unaligned_accesses) {
+    supported_ |= static_cast<uint64_t>(1) << UNALIGNED_ACCESSES;
+  }
+
 #else  // __arm__
   // Probe for additional features not already known to be available.
-  if (!IsSupported(VFP3) && OS::ArmCpuHasFeature(VFP3)) {
+  if (!IsSupported(VFP3) && FLAG_enable_vfp3 && OS::ArmCpuHasFeature(VFP3)) {
     // This implementation also sets the VFP flags if runtime
-    // detection of VFP returns true. VFPv3 implies ARMv7 and VFP2, see ARM DDI
+    // detection of VFP returns true. VFPv3 implies ARMv7, see ARM DDI
     // 0406B, page A1-6.
-    found_by_runtime_probing_ |= 1u << VFP3 | 1u << ARMv7 | 1u << VFP2;
-  } else if (!IsSupported(VFP2) && OS::ArmCpuHasFeature(VFP2)) {
-    found_by_runtime_probing_ |= 1u << VFP2;
+    found_by_runtime_probing_only_ |=
+        static_cast<uint64_t>(1) << VFP3 |
+        static_cast<uint64_t>(1) << ARMv7;
   }
 
-  if (!IsSupported(ARMv7) && OS::ArmCpuHasFeature(ARMv7)) {
-    found_by_runtime_probing_ |= 1u << ARMv7;
+  if (!IsSupported(ARMv7) && FLAG_enable_armv7 && OS::ArmCpuHasFeature(ARMv7)) {
+    found_by_runtime_probing_only_ |= static_cast<uint64_t>(1) << ARMv7;
   }
 
-  supported_ |= found_by_runtime_probing_;
+  if (!IsSupported(SUDIV) && FLAG_enable_sudiv && OS::ArmCpuHasFeature(SUDIV)) {
+    found_by_runtime_probing_only_ |= static_cast<uint64_t>(1) << SUDIV;
+  }
+
+  if (!IsSupported(UNALIGNED_ACCESSES) && FLAG_enable_unaligned_accesses
+      && OS::ArmCpuHasFeature(ARMv7)) {
+    found_by_runtime_probing_only_ |=
+        static_cast<uint64_t>(1) << UNALIGNED_ACCESSES;
+  }
+
+  if (OS::GetCpuImplementer() == QUALCOMM_IMPLEMENTER &&
+      FLAG_enable_movw_movt && OS::ArmCpuHasFeature(ARMv7)) {
+    found_by_runtime_probing_only_ |=
+        static_cast<uint64_t>(1) << MOVW_MOVT_IMMEDIATE_LOADS;
+  }
+
+  if (!IsSupported(VFP32DREGS) && FLAG_enable_32dregs
+      && OS::ArmCpuHasFeature(VFP32DREGS)) {
+    found_by_runtime_probing_only_ |= static_cast<uint64_t>(1) << VFP32DREGS;
+  }
+
+  supported_ |= found_by_runtime_probing_only_;
 #endif
 
-  // Assert that VFP3 implies VFP2 and ARMv7.
-  ASSERT(!IsSupported(VFP3) || (IsSupported(VFP2) && IsSupported(ARMv7)));
+  // Assert that VFP3 implies ARMv7.
+  ASSERT(!IsSupported(VFP3) || IsSupported(ARMv7));
+}
+
+
+void CpuFeatures::PrintTarget() {
+  const char* arm_arch = NULL;
+  const char* arm_test = "";
+  const char* arm_fpu = "";
+  const char* arm_thumb = "";
+  const char* arm_float_abi = NULL;
+
+#if defined CAN_USE_ARMV7_INSTRUCTIONS
+  arm_arch = "arm v7";
+#else
+  arm_arch = "arm v6";
+#endif
+
+#ifdef __arm__
+
+# ifdef ARM_TEST
+  arm_test = " test";
+# endif
+# if defined __ARM_NEON__
+  arm_fpu = " neon";
+# elif defined CAN_USE_VFP3_INSTRUCTIONS
+  arm_fpu = " vfp3";
+# else
+  arm_fpu = " vfp2";
+# endif
+# if (defined __thumb__) || (defined __thumb2__)
+  arm_thumb = " thumb";
+# endif
+  arm_float_abi = OS::ArmUsingHardFloat() ? "hard" : "softfp";
+
+#else  // __arm__
+
+  arm_test = " simulator";
+# if defined CAN_USE_VFP3_INSTRUCTIONS
+#  if defined CAN_USE_VFP32DREGS
+  arm_fpu = " vfp3";
+#  else
+  arm_fpu = " vfp3-d16";
+#  endif
+# else
+  arm_fpu = " vfp2";
+# endif
+# if USE_EABI_HARDFLOAT == 1
+  arm_float_abi = "hard";
+# else
+  arm_float_abi = "softfp";
+# endif
+
+#endif  // __arm__
+
+  printf("target%s %s%s%s %s\n",
+         arm_test, arm_arch, arm_fpu, arm_thumb, arm_float_abi);
+}
+
+
+void CpuFeatures::PrintFeatures() {
+  printf(
+    "ARMv7=%d VFP3=%d VFP32DREGS=%d SUDIV=%d UNALIGNED_ACCESSES=%d "
+    "MOVW_MOVT_IMMEDIATE_LOADS=%d",
+    CpuFeatures::IsSupported(ARMv7),
+    CpuFeatures::IsSupported(VFP3),
+    CpuFeatures::IsSupported(VFP32DREGS),
+    CpuFeatures::IsSupported(SUDIV),
+    CpuFeatures::IsSupported(UNALIGNED_ACCESSES),
+    CpuFeatures::IsSupported(MOVW_MOVT_IMMEDIATE_LOADS));
+#ifdef __arm__
+  bool eabi_hardfloat = OS::ArmUsingHardFloat();
+#elif USE_EABI_HARDFLOAT
+  bool eabi_hardfloat = true;
+#else
+  bool eabi_hardfloat = false;
+#endif
+    printf(" USE_EABI_HARDFLOAT=%d\n", eabi_hardfloat);
 }
 
 Register ToRegister(int num) {
@@ -191,17 +323,21 @@ void RelocInfo::PatchCodeWithCall(Address target, int guard_bytes) {
 // See assembler-arm-inl.h for inlined constructors
 
 Operand::Operand(Handle<Object> handle) {
+#ifdef DEBUG
+  Isolate* isolate = Isolate::Current();
+#endif
+  AllowDeferredHandleDereference using_raw_address;
   rm_ = no_reg;
   // Verify all Objects referred by code are NOT in new space.
   Object* obj = *handle;
-  ASSERT(!HEAP->InNewSpace(obj));
+  ASSERT(!isolate->heap()->InNewSpace(obj));
   if (obj->IsHeapObject()) {
     imm32_ = reinterpret_cast<intptr_t>(handle.location());
     rmode_ = RelocInfo::EMBEDDED_OBJECT;
   } else {
     // no relocation needed
-    imm32_ =  reinterpret_cast<intptr_t>(obj);
-    rmode_ = RelocInfo::NONE;
+    imm32_ = reinterpret_cast<intptr_t>(obj);
+    rmode_ = RelocInfo::NONE32;
   }
 }
 
@@ -219,7 +355,7 @@ Operand::Operand(Register rm, ShiftOp shift_op, int shift_imm) {
     shift_op_ = ROR;
     shift_imm_ = 0;
   }
-  rmode_ = RelocInfo::NONE;  // ?? again why not needed on ARM
+  rmode_ = RelocInfo::NONE32;  // ?? again why not needed on ARM
 }
 
 
@@ -229,7 +365,7 @@ Operand::Operand(Register rm, ShiftOp shift_op, Register rs) {
   rs_ = no_reg;
   shift_op_ = shift_op;
   rs_ = rs;
-  rmode_ = RelocInfo::NONE;  // ?? again why not needed on ARM
+  rmode_ = RelocInfo::NONE32;  // ?? again why not needed on ARM
 }
 
 
@@ -277,47 +413,15 @@ const Instr kPopRegPattern =
     al | B26 | L | 4 | PostIndex | kRegister_sp_Code * B16;
 const Instr kLdrPCPattern = al | 5 * B24 | L | kRegister_pc_Code * B16;
 
-// Spare buffer.
-static const int kMinimalBufferSize = 4*KB;
 
 
-Assembler::Assembler(Isolate* arg_isolate, void* buffer, int buffer_size)
-    : AssemblerBase(arg_isolate),
+Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
+    : AssemblerBase(isolate, buffer, buffer_size),
       recorded_ast_id_(TypeFeedbackId::None()),
-      positions_recorder_(this),
-      emit_debug_code_(FLAG_debug_code),
-      predictable_code_size_(false) {
-  if (buffer == NULL) {
-    // Do our own buffer management.
-    if (buffer_size <= kMinimalBufferSize) {
-      buffer_size = kMinimalBufferSize;
-
-      if (isolate()->assembler_spare_buffer() != NULL) {
-        buffer = isolate()->assembler_spare_buffer();
-        isolate()->set_assembler_spare_buffer(NULL);
-      }
-    }
-    if (buffer == NULL) {
-      buffer_ = NewArray<byte>(buffer_size);
-    } else {
-      buffer_ = static_cast<byte*>(buffer);
-    }
-    buffer_size_ = buffer_size;
-    own_buffer_ = true;
-
-  } else {
-    // Use externally provided buffer instead.
-    ASSERT(buffer_size > 0);
-    buffer_ = static_cast<byte*>(buffer);
-    buffer_size_ = buffer_size;
-    own_buffer_ = false;
-  }
-
-  // Set up buffer pointers.
-  ASSERT(buffer_ != NULL);
-  pc_ = buffer_;
-  reloc_info_writer.Reposition(buffer_ + buffer_size, pc_);
+      positions_recorder_(this) {
+  reloc_info_writer.Reposition(buffer_ + buffer_size_, pc_);
   num_pending_reloc_info_ = 0;
+  num_pending_64_bit_reloc_info_ = 0;
   next_buffer_check_ = 0;
   const_pool_blocked_nesting_ = 0;
   no_const_pool_before_ = 0;
@@ -329,14 +433,6 @@ Assembler::Assembler(Isolate* arg_isolate, void* buffer, int buffer_size)
 
 Assembler::~Assembler() {
   ASSERT(const_pool_blocked_nesting_ == 0);
-  if (own_buffer_) {
-    if (isolate()->assembler_spare_buffer() == NULL &&
-        buffer_size_ == kMinimalBufferSize) {
-      isolate()->set_assembler_spare_buffer(buffer_);
-    } else {
-      DeleteArray(buffer_);
-    }
-  }
 }
 
 
@@ -344,6 +440,7 @@ void Assembler::GetCode(CodeDesc* desc) {
   // Emit constant pool if necessary.
   CheckConstPool(true, false);
   ASSERT(num_pending_reloc_info_ == 0);
+  ASSERT(num_pending_64_bit_reloc_info_ == 0);
 
   // Set up code descriptor.
   desc->buffer = buffer_;
@@ -616,7 +713,7 @@ void Assembler::next(Label* L) {
 // if they can be encoded in the ARM's 12 bits of immediate-offset instruction
 // space.  There is no guarantee that the relocated location can be similarly
 // encoded.
-bool Operand::must_use_constant_pool(const Assembler* assembler) const {
+bool Operand::must_output_reloc_info(const Assembler* assembler) const {
   if (rmode_ == RelocInfo::EXTERNAL_REFERENCE) {
 #ifdef DEBUG
     if (!Serializer::enabled()) {
@@ -625,7 +722,7 @@ bool Operand::must_use_constant_pool(const Assembler* assembler) const {
 #endif  // def DEBUG
     if (assembler != NULL && assembler->predictable_code_size()) return true;
     return Serializer::enabled();
-  } else if (rmode_ == RelocInfo::NONE) {
+  } else if (RelocInfo::IsNone(rmode_)) {
     return false;
   }
   return true;
@@ -1082,7 +1179,7 @@ void Assembler::mov(Register dst, const Operand& src, SBit s, Condition cond) {
   }
 #endif
 
-  if (src.rmode_ != RelocInfo::NONE) {
+  if (src.rmode_ != RelocInfo::NONE32) {
     // some form of relocation needed
     RecordRelocInfo(src.rmode_, src.imm32_);
   }
@@ -1539,7 +1636,7 @@ void Assembler::vstr(const SwVfpRegister src,
 }
 
 void Assembler::vmov(const DwVfpRegister dst,
-                     double imm,
+                     const VmovIndex index,
                      const Register scratch,
                      const Condition cond) {
   PPCPORT_CHECK(false);
@@ -1767,9 +1864,9 @@ void Assembler::GrowBuffer() {
   // Copy the data.
   int pc_delta = desc.buffer - buffer_;
   int rc_delta = (desc.buffer + desc.buffer_size) - (buffer_ + buffer_size_);
-  memmove(desc.buffer, buffer_, desc.instr_size);
-  memmove(reloc_info_writer.pos() + rc_delta,
-          reloc_info_writer.pos(), desc.reloc_size);
+  OS::MemMove(desc.buffer, buffer_, desc.instr_size);
+  OS::MemMove(reloc_info_writer.pos() + rc_delta,
+              reloc_info_writer.pos(), desc.reloc_size);
 
   // Switch buffers.
   DeleteArray(buffer_);
@@ -1800,6 +1897,7 @@ void Assembler::db(uint8_t data) {
   // to write pure data with no pointers and the constant pool should
   // be emitted before using db.
   ASSERT(num_pending_reloc_info_ == 0);
+  ASSERT(num_pending_64_bit_reloc_info_ == 0);
   CheckBuffer();
   *reinterpret_cast<uint8_t*>(pc_) = data;
   pc_ += sizeof(uint8_t);
@@ -1811,36 +1909,33 @@ void Assembler::dd(uint32_t data) {
   // to write pure data with no pointers and the constant pool should
   // be emitted before using dd.
   ASSERT(num_pending_reloc_info_ == 0);
+  ASSERT(num_pending_64_bit_reloc_info_ == 0);
   CheckBuffer();
   *reinterpret_cast<uint32_t*>(pc_) = data;
   pc_ += sizeof(uint32_t);
 }
 
 
-void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
+void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data,
+                                UseConstantPoolMode mode) {
   // We do not try to reuse pool constants.
   RelocInfo rinfo(pc_, rmode, data, NULL);
   if (((rmode >= RelocInfo::JS_RETURN) &&
        (rmode <= RelocInfo::DEBUG_BREAK_SLOT)) ||
-      (rmode == RelocInfo::CONST_POOL)) {
+      (rmode == RelocInfo::CONST_POOL) ||
+      mode == DONT_USE_CONSTANT_POOL) {
     // Adjust code for new modes.
     ASSERT(RelocInfo::IsDebugBreakSlot(rmode)
            || RelocInfo::IsJSReturn(rmode)
            || RelocInfo::IsComment(rmode)
            || RelocInfo::IsPosition(rmode)
-           || RelocInfo::IsConstPool(rmode));
+           || RelocInfo::IsConstPool(rmode)
+           || mode == DONT_USE_CONSTANT_POOL);
     // These modes do not need an entry in the constant pool.
   } else {
-    ASSERT(num_pending_reloc_info_ < kMaxNumPendingRelocInfo);
-    if (num_pending_reloc_info_ == 0) {
-      first_const_pool_use_ = pc_offset();
-    }
-    pending_reloc_info_[num_pending_reloc_info_++] = rinfo;
-    // Make sure the constant pool is not emitted in place of the next
-    // instruction for which we just recorded relocation info.
-    BlockConstPoolFor(1);
+    RecordRelocInfoConstantPoolEntryHelper(rinfo);
   }
-  if (rinfo.rmode() != RelocInfo::NONE) {
+  if (!RelocInfo::IsNone(rinfo.rmode())) {
     // Don't record external references unless the heap will be serialized.
     if (rmode == RelocInfo::EXTERNAL_REFERENCE) {
 #ifdef DEBUG
@@ -1866,14 +1961,38 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   }
 }
 
+void Assembler::RecordRelocInfo(double data) {
+  // We do not try to reuse pool constants.
+  RelocInfo rinfo(pc_, data);
+  RecordRelocInfoConstantPoolEntryHelper(rinfo);
+}
+
+
+void Assembler::RecordRelocInfoConstantPoolEntryHelper(const RelocInfo& rinfo) {
+  ASSERT(num_pending_reloc_info_ < kMaxNumPendingRelocInfo);
+  if (num_pending_reloc_info_ == 0) {
+    first_const_pool_use_ = pc_offset();
+  }
+  pending_reloc_info_[num_pending_reloc_info_++] = rinfo;
+  if (rinfo.rmode() == RelocInfo::NONE64) {
+    ++num_pending_64_bit_reloc_info_;
+  }
+  ASSERT(num_pending_64_bit_reloc_info_ <= num_pending_reloc_info_);
+  // Make sure the constant pool is not emitted in place of the next
+  // instruction for which we just recorded relocation info.
+  BlockConstPoolFor(1);
+}
+
 
 void Assembler::BlockConstPoolFor(int instructions) {
   int pc_limit = pc_offset() + instructions * kInstrSize;
   if (no_const_pool_before_ < pc_limit) {
     // If there are some pending entries, the constant pool cannot be blocked
-    // further than first_const_pool_use_ + kMaxDistToPool
+    // further than constant pool instruction's reach.
     ASSERT((num_pending_reloc_info_ == 0) ||
-           (pc_limit < (first_const_pool_use_ + kMaxDistToPool)));
+           (pc_limit - first_const_pool_use_ < kMaxDistToIntPool));
+    // TODO(jfb) Also check 64-bit entries are in range (requires splitting
+    //           them up from 32-bit entries).
     no_const_pool_before_ = pc_limit;
   }
 
@@ -1896,29 +2015,60 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
 
   // There is nothing to do if there are no pending constant pool entries.
   if (num_pending_reloc_info_ == 0)  {
+    ASSERT(num_pending_64_bit_reloc_info_ == 0);
     // Calculate the offset of the next check.
     next_buffer_check_ = pc_offset() + kCheckPoolInterval;
-    return;
-  }
-
-  // We emit a constant pool when:
-  //  * requested to do so by parameter force_emit (e.g. after each function).
-  //  * the distance to the first instruction accessing the constant pool is
-  //    kAvgDistToPool or more.
-  //  * no jump is required and the distance to the first instruction accessing
-  //    the constant pool is at least kMaxDistToPool / 2.
-  ASSERT(first_const_pool_use_ >= 0);
-  int dist = pc_offset() - first_const_pool_use_;
-  if (!force_emit && dist < kAvgDistToPool &&
-      (require_jump || (dist < (kMaxDistToPool / 2)))) {
     return;
   }
 
   // Check that the code buffer is large enough before emitting the constant
   // pool (include the jump over the pool and the constant pool marker and
   // the gap to the relocation information).
+  // Note 64-bit values are wider, and the first one needs to be 64-bit aligned.
   int jump_instr = require_jump ? kInstrSize : 0;
-  int size = jump_instr + kInstrSize + num_pending_reloc_info_ * kPointerSize;
+  int size_up_to_marker = jump_instr + kInstrSize;
+  int size_after_marker = num_pending_reloc_info_ * kPointerSize;
+  bool has_fp_values = (num_pending_64_bit_reloc_info_ > 0);
+  // 64-bit values must be 64-bit aligned.
+  // We'll start emitting at PC: branch+marker, then 32-bit values, then
+  // 64-bit values which might need to be aligned.
+  bool require_64_bit_align = has_fp_values &&
+      (((uintptr_t)pc_ + size_up_to_marker + size_after_marker) & 0x3);
+  if (require_64_bit_align) {
+    size_after_marker += kInstrSize;
+  }
+  // num_pending_reloc_info_ also contains 64-bit entries, the above code
+  // therefore already counted half of the size for 64-bit entries. Add the
+  // remaining size.
+  STATIC_ASSERT(kPointerSize == kDoubleSize / 2);
+  size_after_marker += num_pending_64_bit_reloc_info_ * (kDoubleSize / 2);
+
+  int size = size_up_to_marker + size_after_marker;
+
+  // We emit a constant pool when:
+  //  * requested to do so by parameter force_emit (e.g. after each function).
+  //  * the distance from the first instruction accessing the constant pool to
+  //    any of the constant pool entries will exceed its limit the next
+  //    time the pool is checked. This is overly restrictive, but we don't emit
+  //    constant pool entries in-order so it's conservatively correct.
+  //  * the instruction doesn't require a jump after itself to jump over the
+  //    constant pool, and we're getting close to running out of range.
+  if (!force_emit) {
+    ASSERT((first_const_pool_use_ >= 0) && (num_pending_reloc_info_ > 0));
+    int dist = pc_offset() + size - first_const_pool_use_;
+    if (has_fp_values) {
+      if ((dist < kMaxDistToFPPool - kCheckPoolInterval) &&
+          (require_jump || (dist < kMaxDistToFPPool / 2))) {
+        return;
+      }
+    } else {
+      if ((dist < kMaxDistToIntPool - kCheckPoolInterval) &&
+          (require_jump || (dist < kMaxDistToIntPool / 2))) {
+        return;
+      }
+    }
+  }
+
   int needed_space = size + kGap;
   while (buffer_space() <= needed_space) GrowBuffer();
 
@@ -1934,11 +2084,48 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
       b(&after_pool);
     }
 
-    // Put down constant pool marker "Undefined instruction" as specified by
-    // A5.6 (ARMv7) Instruction set encoding.
-    emit(kConstantPoolMarker | num_pending_reloc_info_);
+    // Put down constant pool marker "Undefined instruction".
+    // The data size helps disassembly know what to print.
+#if 0  // shouldn't need constant pools
+    emit(kConstantPoolMarker |
+         EncodeConstantPoolLength(size_after_marker / kPointerSize));
+#endif
 
-    // Emit constant pool entries.
+    if (require_64_bit_align) {
+      emit(kConstantPoolMarker);
+    }
+
+#if 0  // shouldn't need constant pools at all
+    // Emit 64-bit constant pool entries first: their range is smaller than
+    // 32-bit entries.
+    for (int i = 0; i < num_pending_reloc_info_; i++) {
+      RelocInfo& rinfo = pending_reloc_info_[i];
+
+      if (rinfo.rmode() != RelocInfo::NONE64) {
+        // 32-bit values emitted later.
+        continue;
+      }
+
+      ASSERT(!((uintptr_t)pc_ & 0x3));  // Check 64-bit alignment.
+
+      Instr instr = instr_at(rinfo.pc());
+      // Instruction to patch must be 'vldr rd, [pc, #offset]' with offset == 0.
+      ASSERT((IsVldrDPcImmediateOffset(instr) &&
+              GetVldrDRegisterImmediateOffset(instr) == 0));
+
+      int delta = pc_ - rinfo.pc() - kPcLoadDelta;
+      ASSERT(is_uint10(delta));
+
+      instr_at_put(rinfo.pc(), SetVldrDRegisterImmediateOffset(instr, delta));
+
+      const double double_data = rinfo.data64();
+      uint64_t uint_data = 0;
+      OS::MemCopy(&uint_data, &double_data, sizeof(double_data));
+      emit(uint_data & 0xFFFFFFFF);
+      emit(uint_data >> 32);
+    }
+
+    // Emit 32-bit constant pool entries.
     for (int i = 0; i < num_pending_reloc_info_; i++) {
       RelocInfo& rinfo = pending_reloc_info_[i];
       ASSERT(rinfo.rmode() != RelocInfo::COMMENT &&
@@ -1964,8 +2151,10 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
 
       emit(rinfo.data());
     }
+#endif
 
     num_pending_reloc_info_ = 0;
+    num_pending_64_bit_reloc_info_ = 0;
     first_const_pool_use_ = -1;
 
     RecordComment("]");

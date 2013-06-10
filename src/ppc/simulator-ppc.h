@@ -209,6 +209,8 @@ class Simulator {
   // generated RegExp code with 7 parameters. This is a convenience function,
   // which sets up the simulator state and grabs the result on return.
   int32_t Call(byte* entry, int argument_count, ...);
+  // Alternative: call a 2-argument double function.
+  double CallFP(byte* entry, double d0, double d1);
 
   // Push an address onto the JS stack.
   uintptr_t PushAddress(uintptr_t address);
@@ -252,6 +254,10 @@ class Simulator {
   // Unsupported instructions use Format to print an error and stop execution.
   void Format(Instruction* instr, const char* format);
 
+  // Checks if the current instruction should be executed based on its
+  // condition bits.
+  bool ConditionallyExecute(Instruction* instr);
+
   // Helper functions to set the conditional flags in the architecture state.
   void SetNZFlags(int32_t val);
   void SetCFlag(bool val);
@@ -270,6 +276,7 @@ class Simulator {
   // Support for VFP.
   void Compute_FPSCR_Flags(double val1, double val2);
   void Copy_FPSCR_to_APSR();
+  inline double canonicalizeNaN(double value);
 
   // Helper functions to decode common "addressing" modes
   int32_t GetShiftRm(Instruction* instr, bool* carry_out);
@@ -330,10 +337,8 @@ class Simulator {
       void* external_function,
       v8::internal::ExternalReference::Type type);
 
-  // For use in calls that take double value arguments.
-  void GetFpArgs(double* x, double* y);
-  void GetFpArgs(double* x);
-  void GetFpArgs(double* x, int32_t* y);
+  // Handle arguments and return value for runtime FP functions.
+  void GetFpArgs(double* x, double* y, int32_t* z);
   void SetFpResult(const double& result);
   void TrashCallerSaveRegisters();
 
@@ -342,6 +347,8 @@ class Simulator {
 
   template<class InputType, int register_size>
       void SetFPRegister(int reg_index, const InputType& value);
+
+  void CallInternal(byte* entry);
 
   // Architecture state.
   // Saturating instructions require a Q flag to indicate saturation.
@@ -358,8 +365,8 @@ class Simulator {
   bool v_flag_;
 
   // VFP architecture state.
-  unsigned int vfp_register[num_s_registers];
-  unsigned int fp_register[num_s_registers];
+  unsigned int vfp_register[num_d_registers];
+  unsigned int fp_register[num_d_registers];
   bool n_flag_FPSCR_;
   bool z_flag_FPSCR_;
   bool c_flag_FPSCR_;
@@ -367,6 +374,7 @@ class Simulator {
 
   // VFP rounding mode. See ARM DDI 0406B Page A2-29.
   VFPRoundingMode FPSCR_rounding_mode_;
+  bool FPSCR_default_NaN_mode_;
 
   // VFP FP exception flags architecture state.
   bool inv_op_vfp_flag_;
@@ -400,14 +408,14 @@ class Simulator {
   static const uint32_t kStopDisabledBit = 1 << 31;
 
   // A stop is enabled, meaning the simulator will stop when meeting the
-  // instruction, if bit 31 of watched_stops[code].count is unset.
-  // The value watched_stops[code].count & ~(1 << 31) indicates how many times
+  // instruction, if bit 31 of watched_stops_[code].count is unset.
+  // The value watched_stops_[code].count & ~(1 << 31) indicates how many times
   // the breakpoint was hit or gone through.
   struct StopCountAndDesc {
     uint32_t count;
     char* desc;
   };
-  StopCountAndDesc watched_stops[kNumOfWatchedStops];
+  StopCountAndDesc watched_stops_[kNumOfWatchedStops];
 };
 
 

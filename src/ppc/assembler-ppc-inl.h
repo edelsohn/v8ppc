@@ -51,10 +51,39 @@ namespace v8 {
 namespace internal {
 
 
+int Register::NumAllocatableRegisters() {
+  return kMaxNumAllocatableRegisters;
+}
+
+
+int DwVfpRegister::NumRegisters() {
+  return CpuFeatures::IsSupported(VFP32DREGS) ? 32 : 16;
+}
+
+
+int DwVfpRegister::NumAllocatableRegisters() {
+  return NumRegisters() - kNumReservedRegisters;
+}
+
+
 int DwVfpRegister::ToAllocationIndex(DwVfpRegister reg) {
   ASSERT(!reg.is(kDoubleRegZero));
   ASSERT(!reg.is(kScratchDoubleReg));
+  if (reg.code() > kDoubleRegZero.code()) {
+    return reg.code() - kNumReservedRegisters;
+  }
   return reg.code();
+}
+
+
+DwVfpRegister DwVfpRegister::FromAllocationIndex(int index) {
+  ASSERT(index >= 0 && index < NumAllocatableRegisters());
+  ASSERT(kScratchDoubleReg.code() - kDoubleRegZero.code() ==
+         kNumReservedRegisters - 1);
+  if (index >= kDoubleRegZero.code()) {
+    return from_code(index + kNumReservedRegisters);
+  }
+  return from_code(index);
 }
 
 
@@ -70,13 +99,13 @@ void RelocInfo::apply(intptr_t delta) {
 
 
 Address RelocInfo::target_address() {
-  ASSERT(IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY);
+  ASSERT(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_));
   return Assembler::target_address_at(pc_);
 }
 
 
 Address RelocInfo::target_address_address() {
-  ASSERT(IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY
+  ASSERT(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)
                               || rmode_ == EMBEDDED_OBJECT
                               || rmode_ == EXTERNAL_REFERENCE);
 
@@ -106,7 +135,7 @@ int RelocInfo::target_address_size() {
 
 
 void RelocInfo::set_target_address(Address target, WriteBarrierMode mode) {
-  ASSERT(IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY);
+  ASSERT(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_));
   Assembler::set_target_address_at(pc_, target);
   if (mode == UPDATE_WRITE_BARRIER && host() != NULL && IsCodeTarget(rmode_)) {
     Object* target_code = Code::GetCodeFromTargetAddress(target);
@@ -130,6 +159,8 @@ Handle<Object> RelocInfo::target_object_handle(Assembler* origin) {
 
 
 Object** RelocInfo::target_object_address() {
+  // Provide a "natural pointer" to the embedded object,
+  // which can be de-referenced during heap iteration.
   ASSERT(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
   reconstructed_obj_ptr_ =
       reinterpret_cast<Object*>(Assembler::target_address_at(pc_));
@@ -139,7 +170,7 @@ Object** RelocInfo::target_object_address() {
 
 void RelocInfo::set_target_object(Object* target, WriteBarrierMode mode) {
   ASSERT(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
-  Assembler::set_target_address_at(pc_, reinterpret_cast<Address>(target));
+  Assembler::set_target_pointer_at(pc_, reinterpret_cast<Address>(target));
   if (mode == UPDATE_WRITE_BARRIER &&
       host() != NULL &&
       target->IsHeapObject()) {
@@ -153,6 +184,19 @@ Address* RelocInfo::target_reference_address() {
   ASSERT(rmode_ == EXTERNAL_REFERENCE);
   reconstructed_adr_ptr_ = Assembler::target_address_at(pc_);
   return &reconstructed_adr_ptr_;
+}
+
+
+Address RelocInfo::target_runtime_entry(Assembler* origin) {
+  ASSERT(IsRuntimeEntry(rmode_));
+  return target_address();
+}
+
+
+void RelocInfo::set_target_runtime_entry(Address target,
+                                         WriteBarrierMode mode) {
+  ASSERT(IsRuntimeEntry(rmode_));
+  if (target_address() != target) set_target_address(target, mode);
 }
 
 
@@ -181,6 +225,24 @@ void RelocInfo::set_target_cell(JSGlobalPropertyCell* cell,
     host()->GetHeap()->incremental_marking()->RecordWrite(
         host(), NULL, cell);
   }
+}
+
+
+static const int kNoCodeAgeSequenceLength = 3;
+
+Code* RelocInfo::code_age_stub() {
+  ASSERT(rmode_ == RelocInfo::CODE_AGE_SEQUENCE);
+  return Code::GetCodeFromTargetAddress(
+      Memory::Address_at(pc_ + Assembler::kInstrSize *
+                         (kNoCodeAgeSequenceLength - 1)));
+}
+
+
+void RelocInfo::set_code_age_stub(Code* stub) {
+  ASSERT(rmode_ == RelocInfo::CODE_AGE_SEQUENCE);
+  Memory::Address_at(pc_ + Assembler::kInstrSize *
+                     (kNoCodeAgeSequenceLength - 1)) =
+      stub->instruction_start();
 }
 
 
@@ -254,6 +316,8 @@ void RelocInfo::Visit(ObjectVisitor* visitor) {
     visitor->VisitGlobalPropertyCell(this);
   } else if (mode == RelocInfo::EXTERNAL_REFERENCE) {
     visitor->VisitExternalReference(this);
+  } else if (RelocInfo::IsCodeAgeSequence(mode)) {
+    visitor->VisitCodeAgeSequence(this);
 #ifdef ENABLE_DEBUGGER_SUPPORT
   // TODO(isolates): Get a cached isolate below.
   } else if (((RelocInfo::IsJSReturn(mode) &&
@@ -263,7 +327,7 @@ void RelocInfo::Visit(ObjectVisitor* visitor) {
              Isolate::Current()->debug()->has_break_points()) {
     visitor->VisitDebugTarget(this);
 #endif
-  } else if (mode == RelocInfo::RUNTIME_ENTRY) {
+  } else if (RelocInfo::IsRuntimeEntry(mode)) {
     visitor->VisitRuntimeEntry(this);
   }
 }
@@ -280,6 +344,8 @@ void RelocInfo::Visit(Heap* heap) {
     StaticVisitor::VisitGlobalPropertyCell(heap, this);
   } else if (mode == RelocInfo::EXTERNAL_REFERENCE) {
     StaticVisitor::VisitExternalReference(this);
+  } else if (RelocInfo::IsCodeAgeSequence(mode)) {
+    StaticVisitor::VisitCodeAgeSequence(heap, this);
 #ifdef ENABLE_DEBUGGER_SUPPORT
   } else if (heap->isolate()->debug()->has_break_points() &&
              ((RelocInfo::IsJSReturn(mode) &&
@@ -288,7 +354,7 @@ void RelocInfo::Visit(Heap* heap) {
               IsPatchedDebugBreakSlotSequence()))) {
     StaticVisitor::VisitDebugTarget(heap, this);
 #endif
-  } else if (mode == RelocInfo::RUNTIME_ENTRY) {
+  } else if (RelocInfo::IsRuntimeEntry(mode)) {
     StaticVisitor::VisitRuntimeEntry(this);
   }
 }
@@ -311,7 +377,7 @@ Operand::Operand(const ExternalReference& f)  {
 Operand::Operand(Smi* value) {
   rm_ = no_reg;
   imm32_ =  reinterpret_cast<intptr_t>(value);
-  rmode_ = RelocInfo::NONE;
+  rmode_ = RelocInfo::NONE32;
 }
 
 
@@ -320,7 +386,7 @@ Operand::Operand(Register rm) {
   rs_ = no_reg;
   shift_op_ = LSL;
   shift_imm_ = 0;
-  rmode_ = RelocInfo::NONE;  // PPC -why doesn't ARM do this?
+  rmode_ = RelocInfo::NONE32;  // PPC -why doesn't ARM do this?
 }
 
 
@@ -350,7 +416,7 @@ void Assembler::emit(Instr x) {
 
 
 #if 0
-Address Assembler::target_address_address_at(Address pc) {
+Address Assembler::target_pointer_address_at(Address pc) {
   Address target_pc = pc;
   Instr instr = Memory::int32_at(target_pc);
   // If we have a bx instruction, the instruction before the bx is
@@ -374,7 +440,7 @@ Address Assembler::target_address_address_at(Address pc) {
 
 // This is functional, but potentially wrong
 // Needs to be reviewed (roohack)
-Address Assembler::target_address_at(Address pc) {
+Address Assembler::target_pointer_at(Address pc) {
   Instr instr1 = instr_at(pc);
   Instr instr2 = instr_at(pc + kInstrSize);
   // Interpret 2 instructions generated by lis/addic
@@ -423,6 +489,49 @@ Address Assembler::target_address_at(Address pc) {
   return pc;  // fake a return (unimplemented path)
 #endif
 }
+Address Assembler::target_address_from_return_address(Address pc) {
+#ifdef PENGUIN_CLEANUP
+  // Returns the address of the call target from the return address that will
+  // be returned to after a call.
+  // Call sequence on V7 or later is :
+  //  movw  ip, #... @ call address low 16
+  //  movt  ip, #... @ call address high 16
+  //  blx   ip
+  //                      @ return address
+  // Or pre-V7 or cases that need frequent patching:
+  //  ldr   ip, [pc, #...] @ call address
+  //  blx   ip
+  //                      @ return address
+  Address candidate = pc - 2 * Assembler::kInstrSize;
+  Instr candidate_instr(Memory::int32_at(candidate));
+  if (IsLdrPcImmediateOffset(candidate_instr)) {
+    return candidate;
+  }
+  candidate = pc - 3 * Assembler::kInstrSize;
+  ASSERT(IsMovW(Memory::int32_at(candidate)) &&
+         IsMovT(Memory::int32_at(candidate + kInstrSize)));
+  return candidate;
+#else
+  PPCPORT_UNIMPLEMENTED();
+  return pc;  // fake a return (unimplemented path)
+#endif
+}
+
+
+Address Assembler::return_address_from_call_start(Address pc) {
+#ifdef PENGUIN_CLEANUP
+  if (IsLdrPcImmediateOffset(Memory::int32_at(pc))) {
+    return pc + kInstrSize * 2;
+  } else {
+    ASSERT(IsMovW(Memory::int32_at(pc)));
+    ASSERT(IsMovT(Memory::int32_at(pc + kInstrSize)));
+    return pc + kInstrSize * 3;
+  }
+#else
+  PPCPORT_UNIMPLEMENTED();
+  return pc;  // fake a return (unimplemented path)
+#endif
+}
 
 
 void Assembler::deserialization_set_special_target_at(
@@ -437,7 +546,7 @@ void Assembler::set_external_target_at(Address constant_pool_entry,
 }
 
 
-void Assembler::set_target_address_at(Address pc, Address target) {
+void Assembler::set_target_pointer_at(Address pc, Address target) {
   Instr instr1 = instr_at(pc);
   Instr instr2 = instr_at(pc + kInstrSize);
   // Interpret 2 instructions generated by lis/addic
@@ -558,6 +667,15 @@ void Assembler::set_target_address_at(Address pc, Address target) {
   }
   CPU::FlushICache(pc, (patched_jump ? 3 : 2) * sizeof(int32_t));
 #endif
+}
+
+Address Assembler::target_address_at(Address pc) {
+  return target_pointer_at(pc);
+}
+
+
+void Assembler::set_target_address_at(Address pc, Address target) {
+  set_target_pointer_at(pc, target);
 }
 
 } }  // namespace v8::internal

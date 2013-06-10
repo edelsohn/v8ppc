@@ -32,7 +32,12 @@
 
 #if defined(V8_TARGET_ARCH_PPC)
 
+#include "assembler.h"
+#include "assembler-ppc.h"
+#include "assembler-ppc-inl.h"
 #include "frames-inl.h"
+#include "macro-assembler.h"
+#include "macro-assembler-ppc.h"
 
 namespace v8 {
 namespace internal {
@@ -41,6 +46,14 @@ namespace internal {
 Address ExitFrame::ComputeStackPointer(Address fp) {
   return Memory::Address_at(fp + ExitFrameConstants::kSPOffset);
 }
+
+
+Register JavaScriptFrame::fp_register() { return v8::internal::fp; }
+Register JavaScriptFrame::context_register() { return cp; }
+
+
+Register StubFailureTrampolineFrame::fp_register() { return v8::internal::fp; }
+Register StubFailureTrampolineFrame::context_register() { return cp; }
 
 
 } }  // namespace v8::internal

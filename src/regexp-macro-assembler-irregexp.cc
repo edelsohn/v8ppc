@@ -465,9 +465,10 @@ void RegExpMacroAssemblerIrregexp::IfRegisterEqPos(int register_index,
 
 Handle<HeapObject> RegExpMacroAssemblerIrregexp::GetCode(
     Handle<String> source) {
+  v8::internal::Isolate* isolate = v8::internal::Isolate::Current();
   Bind(&backtrack_);
   Emit(BC_POP_BT, 0);
-  Handle<ByteArray> array = FACTORY->NewByteArray(length());
+  Handle<ByteArray> array = isolate->factory()->NewByteArray(length());
   Copy(array->GetDataStartAddress());
   return array;
 }

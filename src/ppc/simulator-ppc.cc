@@ -29,7 +29,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <stdlib.h>
-#include <math.h>
+#include <cmath>
 #include <cstdarg>
 #include "v8.h"
 
@@ -37,6 +37,7 @@
 
 #include "disasm.h"
 #include "assembler.h"
+#include "codegen.h"
 #include "ppc/constants-ppc.h"
 #include "ppc/simulator-ppc.h"
 
@@ -115,8 +116,8 @@ void PPCDebugger::Stop(Instruction* instr) {  // roohack need to fix for PPC
   ASSERT(msg != NULL);
 
   // Update this stop description.
-  if (isWatchedStop(code) && !watched_stops[code].desc) {
-    watched_stops[code].desc = msg;
+  if (isWatchedStop(code) && !watched_stops_[code].desc) {
+    watched_stops_[code].desc = msg;
   }
 
   if (strlen(msg) > 0) {
@@ -145,8 +146,8 @@ void PPCDebugger::Stop(Instruction* instr) {
   char* msg = *reinterpret_cast<char**>(sim_->get_pc()
                                         + Instruction::kInstrSize);
   // Update this stop description.
-  if (sim_->isWatchedStop(code) && !sim_->watched_stops[code].desc) {
-    sim_->watched_stops[code].desc = msg;
+  if (sim_->isWatchedStop(code) && !sim_->watched_stops_[code].desc) {
+    sim_->watched_stops_[code].desc = msg;
   }
   // Print the stop message and code if it is not the default code.
   if (code != kMaxStopCode) {
@@ -338,7 +339,7 @@ void PPCDebugger::Debug() {
                 PrintF("\n");
               }
             }
-            for (int i = 0; i < kNumFPDoubleRegisters; i++) {
+            for (int i = 0; i < DwVfpRegister::NumRegisters; i++) {
               dvalue = GetFPDoubleRegisterValue(i);
               uint64_t as_words = BitCast<uint64_t>(dvalue);
               PrintF("%3s: %f 0x%08x %08x\n",
@@ -407,7 +408,7 @@ void PPCDebugger::Debug() {
         int32_t words;
         if (argc == next_arg) {
           words = 10;
-        } else if (argc == next_arg + 1) {
+        } else {
           if (!GetValue(argv[next_arg], &words)) {
             words = 10;
           }
@@ -420,7 +421,7 @@ void PPCDebugger::Debug() {
           HeapObject* obj = reinterpret_cast<HeapObject*>(*cur);
           int value = *cur;
           Heap* current_heap = v8::internal::Isolate::Current()->heap();
-          if (current_heap->Contains(obj) || ((value & 1) == 0)) {
+          if (((value & 1) == 0) || current_heap->Contains(obj)) {
             PrintF(" (");
             if ((value & 1) == 0) {
               PrintF("smi %d", value / 2);
@@ -476,7 +477,7 @@ void PPCDebugger::Debug() {
         while (cur < end) {
           prev = cur;
           cur += dasm.InstructionDecode(buffer, cur);
-          PrintF("MOO3  0x%08x  %s\n",
+          PrintF("  0x%08x  %s\n",
                  reinterpret_cast<intptr_t>(prev), buffer.start());
         }
       } else if (strcmp(cmd, "gdb") == 0) {
@@ -731,7 +732,7 @@ void Simulator::CheckICache(v8::internal::HashMap* i_cache,
                  Instruction::kInstrSize) == 0);
   } else {
     // Cache miss.  Load memory into the cache.
-    memcpy(cached_line, line, CachePage::kLineLength);
+    OS::MemCopy(cached_line, line, CachePage::kLineLength);
     *cache_valid_byte = CachePage::LINE_VALID;
   }
 }
@@ -778,7 +779,7 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // All registers are initialized to zero to start with
   // even though s_registers_ & d_registers_ share the same
   // physical registers in the target.
-  for (int i = 0; i < num_s_registers; i++) {
+  for (int i = 0; i < num_d_registers; i++) {
     fp_register[i] = 0;
   }
   n_flag_FPSCR_ = false;
@@ -786,6 +787,7 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   c_flag_FPSCR_ = false;
   v_flag_FPSCR_ = false;
   FPSCR_rounding_mode_ = RZ;
+  FPSCR_default_NaN_mode_ = true;
 
   inv_op_vfp_flag_ = false;
   div_zero_vfp_flag_ = false;
@@ -915,8 +917,8 @@ double Simulator::get_double_from_register_pair(int reg) {
   // Read the bits from the unsigned integer register_[] array
   // into the double precision floating point value and return it.
   char buffer[2 * sizeof(fp_register[0])];
-  memcpy(buffer, &registers_[reg], 2 * sizeof(registers_[0]));
-  memcpy(&dm_val, buffer, 2 * sizeof(registers_[0]));
+  OS::MemCopy(buffer, &registers_[reg], 2 * sizeof(registers_[0]));
+  OS::MemCopy(&dm_val, buffer, 2 * sizeof(registers_[0]));
   return(dm_val);
 }
 
@@ -963,11 +965,11 @@ template<class InputType, int register_size>
 void Simulator::SetFPRegister(int reg_index, const InputType& value) {
   ASSERT(reg_index >= 0);
   if (register_size == 1) ASSERT(reg_index < num_s_registers);
-  if (register_size == 2) ASSERT(reg_index < num_d_registers);
+  if (register_size == 2) ASSERT(reg_index < DwVfpRegister::NumRegisters());
 
   char buffer[register_size * sizeof(fp_register[0])];
-  memcpy(buffer, &value, register_size * sizeof(fp_register[0]));
-  memcpy(&fp_register[reg_index * register_size], buffer,
+  OS::MemCopy(buffer, &value, register_size * sizeof(fp_register[0]));
+  OS::MemCopy(&fp_register[reg_index * register_size], buffer,
          register_size * sizeof(fp_register[0]));
 }
 
@@ -976,13 +978,13 @@ template<class ReturnType, int register_size>
 ReturnType Simulator::GetFromFPRegister(int reg_index) {
   ASSERT(reg_index >= 0);
   if (register_size == 1) ASSERT(reg_index < num_s_registers);
-  if (register_size == 2) ASSERT(reg_index < num_d_registers);
+  if (register_size == 2) ASSERT(reg_index < DwVfpRegister::NumRegisters());
 
   ReturnType value = 0;
   char buffer[register_size * sizeof(fp_register[0])];
-  memcpy(buffer, &fp_register[register_size * reg_index],
+  OS::MemCopy(buffer, &fp_register[register_size * reg_index],
          register_size * sizeof(fp_register[0]));
-  memcpy(&value, buffer, register_size * sizeof(fp_register[0]));
+  OS::MemCopy(&value, buffer, register_size * sizeof(fp_register[0]));
   return value;
 }
 
@@ -1013,9 +1015,9 @@ void Simulator::GetFpArgs(double* x, int32_t* y) {
 // ugly - due to ARM heritage simulator single/double registers overlap
 void Simulator::SetFpResult(const double& result) {
   char buffer[2 * sizeof(fp_register[2])];
-  memcpy(buffer, &result, sizeof(buffer));
+  OS::MemCopy(buffer, &result, sizeof(buffer));
   // Copy result to d1.
-  memcpy(&fp_register[2], buffer, sizeof(buffer));
+  OS::MemCopy(&fp_register[2], buffer, sizeof(buffer));
 }
 
 
@@ -1183,7 +1185,7 @@ bool Simulator::OverflowFrom(int32_t alu_out,
 
 // Support for VFP comparisons.
 void Simulator::Compute_FPSCR_Flags(double val1, double val2) {
-  if (isnan(val1) || isnan(val2)) {
+  if (std::isnan(val1) || std::isnan(val2)) {
     n_flag_FPSCR_ = false;
     z_flag_FPSCR_ = false;
     c_flag_FPSCR_ = true;
@@ -1236,19 +1238,23 @@ typedef int64_t (*SimulatorRuntimeFPCallX)(double arg0,
 typedef double (*SimulatorRuntimeFPCallY)(double arg0,
                                          int32_t arg1);
 #else
-typedef double (*SimulatorRuntimeFPCall)(int32_t arg0,
-                                         int32_t arg1,
-                                         int32_t arg2,
-                                         int32_t arg3);
+// These prototypes handle the four types of FP calls.
+typedef int64_t (*SimulatorRuntimeCompareCall)(double darg0, double darg1);
+typedef double (*SimulatorRuntimeFPFPCall)(double darg0, double darg1);
+typedef double (*SimulatorRuntimeFPCall)(double darg0);
+typedef double (*SimulatorRuntimeFPIntCall)(double darg0, int32_t arg0);
 #endif
 
 // This signature supports direct call in to API function native callback
 // (refer to InvocationCallback in v8.h).
 typedef v8::Handle<v8::Value> (*SimulatorRuntimeDirectApiCall)(int32_t arg0);
+typedef void (*SimulatorRuntimeDirectApiCallNew)(int32_t arg0);
 
 // This signature supports direct call to accessor getter callback.
 typedef v8::Handle<v8::Value> (*SimulatorRuntimeDirectGetterCall)(int32_t arg0,
                                                                   int32_t arg1);
+typedef void (*SimulatorRuntimeDirectGetterCallNew)(int32_t arg0,
+                                                    int32_t arg1);
 
 // Software interrupt instructions are used by the simulator to call into the
 // C-based V8 runtime.
@@ -1306,27 +1312,27 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
       intptr_t external =
           reinterpret_cast<intptr_t>(redirection->external_function());
       if (fp_call) {
+        double dval0, dval1;  // one or two double parameters
+        int32_t ival;         // zero or one integer parameters
+        int64_t iresult = 0;  // integer return value
+        double dresult = 0;   // double return value
+        GetFpArgs(&dval0, &dval1, &ival);
         if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
-          SimulatorRuntimeFPCall target =
-              reinterpret_cast<SimulatorRuntimeFPCall>(external);
-          double dval0, dval1;
-          int32_t ival;
+          SimulatorRuntimeCall generic_target =
+            reinterpret_cast<SimulatorRuntimeCall>(external);
           switch (redirection->type()) {
           case ExternalReference::BUILTIN_FP_FP_CALL:
           case ExternalReference::BUILTIN_COMPARE_CALL:
-            GetFpArgs(&dval0, &dval1);
             PrintF("Call to host function at %p with args %f, %f",
-                FUNCTION_ADDR(target), dval0, dval1);
+                   FUNCTION_ADDR(generic_target), dval0, dval1);
             break;
           case ExternalReference::BUILTIN_FP_CALL:
-            GetFpArgs(&dval0);
             PrintF("Call to host function at %p with arg %f",
-                FUNCTION_ADDR(target), dval0);
+                FUNCTION_ADDR(generic_target), dval0);
             break;
           case ExternalReference::BUILTIN_FP_INT_CALL:
-            GetFpArgs(&dval0, &ival);
             PrintF("Call to host function at %p with args %f, %d",
-                FUNCTION_ADDR(target), dval0, ival);
+                   FUNCTION_ADDR(generic_target), dval0, ival);
             break;
           default:
             UNREACHABLE();
@@ -1377,59 +1383,106 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
           break;
         }
 #else
-        if (redirection->type() != ExternalReference::BUILTIN_COMPARE_CALL) {
+        switch (redirection->type()) {
+        case ExternalReference::BUILTIN_COMPARE_CALL: {
+          SimulatorRuntimeCompareCall target =
+            reinterpret_cast<SimulatorRuntimeCompareCall>(external);
+          iresult = target(dval0, dval1);
+          set_register(r3, static_cast<int32_t>(iresult));
+          set_register(r4, static_cast<int32_t>(iresult >> 32));
+          break;
+        }
+        case ExternalReference::BUILTIN_FP_FP_CALL: {
+          SimulatorRuntimeFPFPCall target =
+            reinterpret_cast<SimulatorRuntimeFPFPCall>(external);
+          dresult = target(dval0, dval1);
+          SetFpResult(dresult);
+          break;
+        }
+        case ExternalReference::BUILTIN_FP_CALL: {
           SimulatorRuntimeFPCall target =
-              reinterpret_cast<SimulatorRuntimeFPCall>(external);
-          double result = target(arg0, arg1, arg2, arg3);
-          SetFpResult(result);
-        } else {
-          SimulatorRuntimeCall target =
-              reinterpret_cast<SimulatorRuntimeCall>(external);
-          int64_t result = target(arg0, arg1, arg2, arg3, arg4, arg5);
-          int32_t lo_res = static_cast<int32_t>(result);
-          int32_t hi_res = static_cast<int32_t>(result >> 32);
-          if (::v8::internal::FLAG_trace_sim) {
-            PrintF("Returned %08x\n", lo_res);
+            reinterpret_cast<SimulatorRuntimeFPCall>(external);
+          dresult = target(dval0);
+          SetFpResult(dresult);
+          break;
+        }
+        case ExternalReference::BUILTIN_FP_INT_CALL: {
+          SimulatorRuntimeFPIntCall target =
+            reinterpret_cast<SimulatorRuntimeFPIntCall>(external);
+          dresult = target(dval0, ival);
+          SetFpResult(dresult);
+          break;
+        }
+        default:
+          UNREACHABLE();
+          break;
+        }
+        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
+          switch (redirection->type()) {
+          case ExternalReference::BUILTIN_COMPARE_CALL:
+            PrintF("Returned %08x\n", static_cast<int32_t>(iresult));
+            break;
+          case ExternalReference::BUILTIN_FP_FP_CALL:
+          case ExternalReference::BUILTIN_FP_CALL:
+          case ExternalReference::BUILTIN_FP_INT_CALL:
+            PrintF("Returned %f\n", dresult);
+            break;
+          default:
+            UNREACHABLE();
+            break;
           }
-          set_register(r3, lo_res);
-          set_register(r4, hi_res);
         }
 #endif
-
-      } else if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
-        SimulatorRuntimeDirectApiCall target =
-            reinterpret_cast<SimulatorRuntimeDirectApiCall>(external);
+      } else if (
+          redirection->type() == ExternalReference::DIRECT_API_CALL ||
+          redirection->type() == ExternalReference::DIRECT_API_CALL_NEW) {
         if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
           PrintF("Call to host function at %p args %08x",
-              FUNCTION_ADDR(target), arg0);
+              reinterpret_cast<void*>(external), arg0);
           if (!stack_aligned) {
             PrintF(" with unaligned stack %08x\n", get_register(sp));
           }
           PrintF("\n");
         }
         CHECK(stack_aligned);
-        v8::Handle<v8::Value> result = target(arg0);
-        if (::v8::internal::FLAG_trace_sim) {
-          PrintF("Returned %p\n", reinterpret_cast<void *>(*result));
+        if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
+          SimulatorRuntimeDirectApiCall target =
+              reinterpret_cast<SimulatorRuntimeDirectApiCall>(external);
+          v8::Handle<v8::Value> result = target(arg0);
+          if (::v8::internal::FLAG_trace_sim) {
+            PrintF("Returned %p\n", reinterpret_cast<void *>(*result));
+          }
+          set_register(r3, reinterpret_cast<int32_t>(*result));
+        } else {
+          SimulatorRuntimeDirectApiCallNew target =
+              reinterpret_cast<SimulatorRuntimeDirectApiCallNew>(external);
+          target(arg0);
         }
-        set_register(r0, (int32_t) *result);
-      } else if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
-        SimulatorRuntimeDirectGetterCall target =
-            reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
+      } else if (
+          redirection->type() == ExternalReference::DIRECT_GETTER_CALL ||
+          redirection->type() == ExternalReference::DIRECT_GETTER_CALL_NEW) {
         if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
           PrintF("Call to host function at %p args %08x %08x",
-              FUNCTION_ADDR(target), arg0, arg1);
+              reinterpret_cast<void*>(external), arg0, arg1);
           if (!stack_aligned) {
             PrintF(" with unaligned stack %08x\n", get_register(sp));
           }
           PrintF("\n");
         }
         CHECK(stack_aligned);
-        v8::Handle<v8::Value> result = target(arg0, arg1);
-        if (::v8::internal::FLAG_trace_sim) {
-          PrintF("Returned %p\n", reinterpret_cast<void *>(*result));
+        if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
+          SimulatorRuntimeDirectGetterCall target =
+              reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
+          v8::Handle<v8::Value> result = target(arg0, arg1);
+          if (::v8::internal::FLAG_trace_sim) {
+            PrintF("Returned %p\n", reinterpret_cast<void *>(*result));
+          }
+          set_register(r3, reinterpret_cast<int32_t>(*result));
+        } else {
+          SimulatorRuntimeDirectGetterCallNew target =
+              reinterpret_cast<SimulatorRuntimeDirectGetterCallNew>(external);
+          target(arg0, arg1);
         }
-        set_register(r0, (int32_t) *result);
       } else {
         // builtin call.
         ASSERT(redirection->type() == ExternalReference::BUILTIN_CALL);
@@ -1499,6 +1552,11 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
 }
 
 
+double Simulator::canonicalizeNaN(double value) {
+  return (FPSCR_default_NaN_mode_ && std::isnan(value)) ?
+    FixedDoubleArray::canonical_not_the_hole_nan_as_double() : value;
+}
+
 // Stop helper functions.
 bool Simulator::isStopInstruction(Instruction* instr) {
   return (instr->Bits(27, 24) == 0xF) && (instr->SvcValue() >= kStopCode);
@@ -1515,14 +1573,14 @@ bool Simulator::isEnabledStop(uint32_t code) {
   ASSERT(code <= kMaxStopCode);
   // Unwatched stops are always enabled.
   return !isWatchedStop(code) ||
-    !(watched_stops[code].count & kStopDisabledBit);
+    !(watched_stops_[code].count & kStopDisabledBit);
 }
 
 
 void Simulator::EnableStop(uint32_t code) {
   ASSERT(isWatchedStop(code));
   if (!isEnabledStop(code)) {
-    watched_stops[code].count &= ~kStopDisabledBit;
+    watched_stops_[code].count &= ~kStopDisabledBit;
   }
 }
 
@@ -1530,7 +1588,7 @@ void Simulator::EnableStop(uint32_t code) {
 void Simulator::DisableStop(uint32_t code) {
   ASSERT(isWatchedStop(code));
   if (isEnabledStop(code)) {
-    watched_stops[code].count |= kStopDisabledBit;
+    watched_stops_[code].count |= kStopDisabledBit;
   }
 }
 
@@ -1538,13 +1596,13 @@ void Simulator::DisableStop(uint32_t code) {
 void Simulator::IncreaseStopCounter(uint32_t code) {
   ASSERT(code <= kMaxStopCode);
   ASSERT(isWatchedStop(code));
-  if ((watched_stops[code].count & ~(1 << 31)) == 0x7fffffff) {
+  if ((watched_stops_[code].count & ~(1 << 31)) == 0x7fffffff) {
     PrintF("Stop counter for code %i has overflowed.\n"
            "Enabling this code and reseting the counter to 0.\n", code);
-    watched_stops[code].count = 0;
+    watched_stops_[code].count = 0;
     EnableStop(code);
   } else {
-    watched_stops[code].count++;
+    watched_stops_[code].count++;
   }
 }
 
@@ -1556,12 +1614,12 @@ void Simulator::PrintStopInfo(uint32_t code) {
     PrintF("Stop not watched.");
   } else {
     const char* state = isEnabledStop(code) ? "Enabled" : "Disabled";
-    int32_t count = watched_stops[code].count & ~kStopDisabledBit;
+    int32_t count = watched_stops_[code].count & ~kStopDisabledBit;
     // Don't print the state of unused breakpoints.
     if (count != 0) {
-      if (watched_stops[code].desc) {
+      if (watched_stops_[code].desc) {
         PrintF("stop %i - 0x%x: \t%s, \tcounter = %i, \t%s\n",
-               code, code, state, count, watched_stops[code].desc);
+               code, code, state, count, watched_stops_[code].desc);
       } else {
         PrintF("stop %i - 0x%x: \t%s, \tcounter = %i\n",
                code, code, state, count);

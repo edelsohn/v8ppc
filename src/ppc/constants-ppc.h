@@ -431,6 +431,31 @@ enum FAKE_OPCODE_T {
   fMASM26 = 68,
   fMASM27 = 69,
   fMASM28 = 70,
+
+  // Gap in numbers to assist in later merge with master
+  fMASM29 = 89,
+  fMASM30 = 90,
+  fMASM31 = 91,
+  fMASM32 = 92,
+  fMASM33 = 93,
+  fMASM34 = 94,
+  fMASM35 = 95,
+  fMASM36 = 96,
+  fMASM37 = 97,
+  fMASM38 = 98,
+  fMASM39 = 99,
+  fMASM40 = 100,
+  fMASM41 = 101,
+  fMASM42 = 102,
+  fMASM43 = 103,
+
+  fMASM44 = 104,
+  fMASM45 = 105,
+  fMASM46 = 106,
+  fMASM47 = 107,
+  fMASM48 = 108,
+  fMASM49 = 109,
+
   fLastFaker  // can't be more than 128
 };
 
