@@ -531,7 +531,11 @@ void StubCompiler::GenerateStoreTransition(MacroAssembler* masm,
     __ JumpIfNotSmi(value_reg, &heap_number);
     __ SmiUntag(scratch1, value_reg);
     __ vmov(s0, scratch1);
+#if  0
     __ vcvt_f64_s32(d0, s0);
+#else
+    __ fake_asm(fMASM44);
+#endif
     __ jmp(&do_store);
 
     __ bind(&heap_number);
@@ -717,7 +721,11 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
     __ JumpIfNotSmi(value_reg, &heap_number);
     __ SmiUntag(scratch2, value_reg);
     __ vmov(s0, scratch2);
+#if 0
     __ vcvt_f64_s32(d0, s0);
+#else 
+   __ fake_asm(fMASM45);
+#endif
     __ jmp(&do_store);
 
     __ bind(&heap_number);
@@ -918,7 +926,7 @@ static void GenerateFastApiDirectCall(MacroAssembler* masm,
   } else {
     __ Move(r9, call_data);
   }
-  __ mov(r10, Operand(ExternalReference::isolate_address()));
+  __ mov(r10, Operand(ExternalReference::isolate_address(masm->isolate())));
   // Store JS function, call data and isolate.
   __ stw(r8, MemOperand(sp, 1 * kPointerSize));
   __ stw(r9, MemOperand(sp, 2 * kPointerSize));
@@ -1752,8 +1760,10 @@ Handle<Code> CallStubCompiler::CompileArrayPushCall(
       __ b(gt, &call_builtin);
 
       __ lwz(r7, MemOperand(sp, (argc - 1) * kPointerSize));
-      __ StoreNumberToDoubleElements(r7, r3, elements, r8,
-                                     &call_builtin, argc * kDoubleSize);
+      // This call to StoreNumberToDoubleElements may not be correct
+      __ StoreNumberToDoubleElements(r7, r3, receiver, elements, r8,
+                                     r6, r10, r22,
+                                     &call_builtin);
 
       // Save new length.
       __ stw(r3, FieldMemOperand(receiver, JSArray::kLengthOffset));
@@ -2553,7 +2563,7 @@ void CallStubCompiler::CompileHandlerFrontend(Handle<Object> object,
           r3, holder, r6, r4, r7, name, &miss);
       break;
 
-       case NUMBER_CHECK: {
+    case NUMBER_CHECK: {
       Label fast;
       // Check that the object is a smi or a heap number.
       __ JumpIfSmi(r4, &fast);
@@ -2567,8 +2577,8 @@ void CallStubCompiler::CompileHandlerFrontend(Handle<Object> object,
           Handle<JSObject>(JSObject::cast(object->GetPrototype(isolate()))),
           r3, holder, r6, r4, r7, name, &miss);
       break;
-
-    case BOOLEAN_CHECK:
+    }
+    case BOOLEAN_CHECK: {
       Label fast;
       // Check that the object is a boolean.
       __ LoadRoot(ip, Heap::kTrueValueRootIndex);
@@ -2585,6 +2595,7 @@ void CallStubCompiler::CompileHandlerFrontend(Handle<Object> object,
           Handle<JSObject>(JSObject::cast(object->GetPrototype(isolate()))),
           r3, holder, r6, r4, r7, name, &miss);
       break;
+    }
   }
 
   __ b(success);
@@ -3209,7 +3220,7 @@ static void GenerateSmiKeyCheck(MacroAssembler* masm,
   __ lwz(scratch0, MemOperand(sp, 4));
 #endif
   __ add(sp, sp, Operand(8));
-  __ TrySmiTag(scratch0, fail, scratch1);
+  __ TrySmiTag(scratch0, fail);
   __ mr(key, scratch0);
   __ bind(&key_ok);
 }
@@ -3236,7 +3247,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
   // have been verified by the caller to not be a smi.
 
   // Check that the key is a smi or a heap number convertible to a smi.
-  GenerateSmiKeyCheck(masm, key, r7, d1, d2, &miss_force_generic);
+  GenerateSmiKeyCheck(masm, key, r7, r8, d1, &miss_force_generic);
 
   __ lwz(r6, FieldMemOperand(receiver, JSObject::kElementsOffset));
 
@@ -3453,7 +3464,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(
   // have been verified by the caller to not be a smi.
 
   // Check that the key is a smi or a heap number convertible to a smi.
-  GenerateSmiKeyCheck(masm, key_reg, r7, d1, d2, &miss_force_generic);
+  GenerateSmiKeyCheck(masm, key_reg, r7, r8, d1, &miss_force_generic);
 
   if (IsFastSmiElementsKind(elements_kind)) {
     __ JumpIfNotSmi(value_reg, &transition_elements_kind);
@@ -3614,7 +3625,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
   // have been verified by the caller to not be a smi.
 
   // Check that the key is a smi or a heap number convertible to a smi.
-  GenerateSmiKeyCheck(masm, key_reg, r7, d1, d2, &miss_force_generic);
+  GenerateSmiKeyCheck(masm, key_reg, r7, r8, d1, &miss_force_generic);
 
   __ lwz(elements_reg,
          FieldMemOperand(receiver_reg, JSObject::kElementsOffset));
@@ -3692,8 +3703,11 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
            FieldMemOperand(elements_reg, FixedDoubleArray::kLengthOffset));
 
     __ mr(scratch1, elements_reg);
-    __ StoreNumberToDoubleElements(value_reg, key_reg, scratch1,
-                                   scratch2, &transition_elements_kind);
+    // roohack - this very likely is wrong and needs to be fixed
+    __ StoreNumberToDoubleElements(value_reg, key_reg, receiver_reg, 
+                                   elements_reg, scratch1,
+                                   scratch2, scratch3, scratch4,
+                                   &transition_elements_kind);
 
     __ mov(scratch1, Operand(kHoleNanLower32));
     __ mov(scratch2, Operand(kHoleNanUpper32));

@@ -448,10 +448,10 @@ enum FAKE_OPCODE_T {
   fMASM41 = 101,
   fMASM42 = 102,
   fMASM43 = 103,
-
   fMASM44 = 104,
   fMASM45 = 105,
-  fMASM46 = 106,
+
+  fMASM46 = 106,  // unused below here
   fMASM47 = 107,
   fMASM48 = 108,
   fMASM49 = 109,
