@@ -618,13 +618,13 @@ static byte* GetNoCodeAgeSequence(uint32_t* length) {
   if (!initialized) {
     CodePatcher patcher(byte_sequence, kNoCodeAgeSequenceLength);
     PredictableCodeSizeScope scope(patcher.masm(), *length);
-#if 0
-    patcher.masm()->stm(db_w, sp, r1.bit() | cp.bit() | fp.bit() | lr.bit());
-    patcher.masm()->LoadRoot(ip, Heap::kUndefinedValueRootIndex);
-    patcher.masm()->add(fp, sp, Operand(2 * kPointerSize));
-#else
-    patcher.masm()->fake_asm(fMASM46);
-#endif
+    patcher.masm()-> mflr(r0);
+    patcher.masm()-> MultiPush(r1.bit() | cp.bit() | fp.bit() | r0.bit());
+    // Load undefined value here, so the value is ready for the loop
+    // below.
+    patcher.masm()-> LoadRoot(ip, Heap::kUndefinedValueRootIndex);
+    // Adjust FP to point to saved FP.
+    patcher.masm()-> add(fp, sp, Operand(2 * kPointerSize));
     initialized = true;
   }
   return byte_sequence;

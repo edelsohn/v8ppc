@@ -228,7 +228,7 @@ void RelocInfo::set_target_cell(JSGlobalPropertyCell* cell,
 }
 
 
-static const int kNoCodeAgeSequenceLength = 3;
+static const int kNoCodeAgeSequenceLength = 8;
 
 Code* RelocInfo::code_age_stub() {
   ASSERT(rmode_ == RelocInfo::CODE_AGE_SEQUENCE);

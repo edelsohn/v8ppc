@@ -3984,29 +3984,28 @@ void MacroAssembler::CheckEnumCache(Register null_value, Label* call_runtime) {
 void MacroAssembler::TestJSArrayForAllocationSiteInfo(
     Register receiver_reg,
     Register scratch_reg) {
-#ifdef PENGUIN_CLEANUP
   Label no_info_available;
   ExternalReference new_space_start =
       ExternalReference::new_space_start(isolate());
   ExternalReference new_space_allocation_top =
       ExternalReference::new_space_allocation_top_address(isolate());
+
   add(scratch_reg, receiver_reg,
       Operand(JSArray::kSize + AllocationSiteInfo::kSize - kHeapObjectTag));
-  cmp(scratch_reg, Operand(new_space_start));
+  mov(ip, Operand(new_space_start));
+  cmp(scratch_reg, ip);
   b(lt, &no_info_available);
+
   mov(ip, Operand(new_space_allocation_top));
-  ldr(ip, MemOperand(ip));
+  lwz(ip, MemOperand(ip));
   cmp(scratch_reg, ip);
   b(gt, &no_info_available);
-  ldr(scratch_reg, MemOperand(scratch_reg, -AllocationSiteInfo::kSize));
-  cmp(scratch_reg,
-      Operand(Handle<Map>(isolate()->heap()->allocation_site_info_map())));
+
+  lwz(scratch_reg, MemOperand(scratch_reg, -AllocationSiteInfo::kSize));
+  mov(ip, Operand(Handle<Map>(isolate()->heap()->allocation_site_info_map())));
+  cmp(scratch_reg, ip);
+
   bind(&no_info_available);
-#else
-  PPCPORT_UNIMPLEMENTED();
-  fake_asm(fMASM7);
-  ASSERT(false);
-#endif
 }
 
 #ifdef DEBUG

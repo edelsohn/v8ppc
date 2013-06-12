@@ -348,6 +348,8 @@ static void GenerateKeyNameCheck(MacroAssembler* masm,
   __ andi(r0, hash, Operand(kIsInternalizedMask));
   __ cmpi(r0, Operand(0));
   __ beq(not_unique);
+
+  __ bind(&unique);
 }
 
 

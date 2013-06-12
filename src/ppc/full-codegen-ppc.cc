@@ -171,7 +171,7 @@ void FullCodeGenerator::Generate() {
   {
     PredictableCodeSizeScope predictible_code_size_scope(
         masm_, kNoCodeAgeSequenceLength * Assembler::kInstrSize);
-    // The following three instructions must remain together and unmodified
+    // The following instructions must remain together and unmodified
     // for code aging to work properly.
     __ mflr(r0);
     __ MultiPush(r1.bit() | cp.bit() | fp.bit() | r0.bit());
@@ -300,7 +300,7 @@ void FullCodeGenerator::Generate() {
       __ LoadRoot(ip, Heap::kStackLimitRootIndex);
       __ cmpl(sp, ip);
       __ bge(&ok);
-      PredictableCodeSizeScope predictable(masm_, 2 * Assembler::kInstrSize);
+      PredictableCodeSizeScope predictable(masm_, 4 * Assembler::kInstrSize);
       StackCheckStub stub;
       __ CallStub(&stub);
       __ bind(&ok);
