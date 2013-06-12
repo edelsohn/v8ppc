@@ -4530,7 +4530,7 @@ void LCodeGen::DoStoreKeyedFixedDoubleArray(LStoreKeyed* instr) {
     __ VFPCanonicalizeNaN(value);
   }
 #else
- __ fake_asm(fMASM37);
+  __ fake_asm(fMASM37);
 #endif
   __ vstr(value, scratch, instr->additional_index() << element_size_shift);
 }
@@ -4561,7 +4561,7 @@ void LCodeGen::DoStoreKeyedFixedArray(LStoreKeyed* instr) {
 #if 0
       __ add(scratch, elements, Operand::PointerOffsetFromSmiKey(key));
 #else
-   __ fake_asm(fMASM38);
+      __ fake_asm(fMASM38);
 #endif
     } else {
       __ add(scratch, elements, Operand(key, LSL, kPointerSizeLog2));

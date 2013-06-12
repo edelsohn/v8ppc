@@ -451,9 +451,9 @@ enum FAKE_OPCODE_T {
   fMASM44 = 104,
   fMASM45 = 105,
 
-  fMASM46 = 106,  // unused below here
+  fMASM46 = 106,
   fMASM47 = 107,
-  fMASM48 = 108,
+  fMASM48 = 108,  // unused below here
   fMASM49 = 109,
 
   fLastFaker  // can't be more than 128

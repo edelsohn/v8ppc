@@ -132,7 +132,7 @@ static void ProbeTable(Isolate* isolate,
 static void GenerateDictionaryNegativeLookup(MacroAssembler* masm,
                                              Label* miss_label,
                                              Register receiver,
-                                             Handle<String> name,
+                                             Handle<Name> name,
                                              Register scratch0,
                                              Register scratch1) {
   ASSERT(name->IsUniqueName());
@@ -723,8 +723,8 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
     __ vmov(s0, scratch2);
 #if 0
     __ vcvt_f64_s32(d0, s0);
-#else 
-   __ fake_asm(fMASM45);
+#else
+    __ fake_asm(fMASM45);
 #endif
     __ jmp(&do_store);
 
@@ -1191,6 +1191,10 @@ static void GenerateCheckPropertyCells(MacroAssembler* masm,
     }
     current = Handle<JSObject>(JSObject::cast(current->GetPrototype()));
   }
+}
+
+void StubCompiler::GenerateTailCall(MacroAssembler* masm, Handle<Code> code) {
+  __ Jump(code, RelocInfo::CODE_TARGET);
 }
 
 #undef __
@@ -2949,7 +2953,7 @@ void KeyedLoadStubCompiler::GenerateNameCheck(Handle<Name> name,
                                               Register name_reg,
                                               Label* miss) {
   __ mov(r0, Operand(name));
-  __ cmp(name_reg, r0); 
+  __ cmp(name_reg, r0);
   __ b(ne, miss);
 }
 
@@ -2958,7 +2962,7 @@ void KeyedStoreStubCompiler::GenerateNameCheck(Handle<Name> name,
                                                Register name_reg,
                                                Label* miss) {
   __ mov(r0, Operand(name));
-  __ cmp(name_reg, r0); 
+  __ cmp(name_reg, r0);
   __ b(ne, miss);
 }
 
@@ -3704,7 +3708,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
 
     __ mr(scratch1, elements_reg);
     // roohack - this very likely is wrong and needs to be fixed
-    __ StoreNumberToDoubleElements(value_reg, key_reg, receiver_reg, 
+    __ StoreNumberToDoubleElements(value_reg, key_reg, receiver_reg,
                                    elements_reg, scratch1,
                                    scratch2, scratch3, scratch4,
                                    &transition_elements_kind);

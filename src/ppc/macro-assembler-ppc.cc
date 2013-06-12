@@ -1728,11 +1728,16 @@ void MacroAssembler::Allocate(int object_size,
   Register topaddr = scratch1;
   Register obj_size_reg = scratch2;
   mov(topaddr, Operand(allocation_top));
+#if 0
   Operand obj_size_operand = Operand(object_size);
   if (!obj_size_operand.is_single_instruction(this)) {
     // We are about to steal IP, so we need to load this value first
     li(obj_size_reg, obj_size_operand);
   }
+#else
+  // this won't work for very large object on PowerPC
+  li(obj_size_reg, Operand(object_size));
+#endif
 
   // This code stores a temporary value in ip. This is OK, as the code below
   // does not need ip for implicit literal generation.

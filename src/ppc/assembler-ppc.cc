@@ -895,7 +895,7 @@ void Assembler::rlwinm(Register ra, Register rs,
   mb &= 0x1f;
   me &= 0x1f;
   CheckBuffer();
-  emit(RLWINMX | rs.code()*B21 | ra.code()*B16 | sh*B11 | mb*B6  | me<<1 | rc);
+  emit(RLWINMX | rs.code()*B21 | ra.code()*B16 | sh*B11 | mb*B6 | me << 1 | rc);
 }
 
 void Assembler::rlwimi(Register ra, Register rs,
@@ -904,7 +904,7 @@ void Assembler::rlwimi(Register ra, Register rs,
   mb &= 0x1f;
   me &= 0x1f;
   CheckBuffer();
-  emit(RLWIMIX | rs.code()*B21 | ra.code()*B16 | sh*B11 | mb*B6  | me<<1 | rc);
+  emit(RLWIMIX | rs.code()*B21 | ra.code()*B16 | sh*B11 | mb*B6 | me << 1 | rc);
 }
 
 void Assembler::slwi(Register dst, Register src, const Operand& val) {
@@ -1634,6 +1634,15 @@ void Assembler::vstr(const SwVfpRegister src,
   PPCPORT_CHECK(false);
   EMIT_FAKE_ARM_INSTR(fVSTR);
 }
+
+
+void Assembler::vmov(const DwVfpRegister dst,
+                     double imm,
+                     const Register scratch) {
+  PPCPORT_CHECK(false);
+  EMIT_FAKE_ARM_INSTR(fVMOV);
+}
+
 
 void Assembler::vmov(const DwVfpRegister dst,
                      const VmovIndex index,

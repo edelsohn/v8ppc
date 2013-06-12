@@ -2282,12 +2282,12 @@ static void CallCCodeForDoubleOperation(MacroAssembler* masm,
   __ mov(r0, Operand(heap_number_result));
   __ pop(pc);
 }
+#endif
 
 
 void BinaryOpStub::Initialize() {
   platform_specific_bit_ = true;  // VFP2 is a base requirement for V8
 }
-#endif
 
 void BinaryOpStub::GenerateTypeTransition(MacroAssembler* masm) {
   Label get_result;
@@ -4994,7 +4994,7 @@ void ArgumentsAccessStub::GenerateNewStrict(MacroAssembler* masm) {
   __ add(r4, r4, Operand(Heap::kArgumentsObjectSizeStrict / kPointerSize));
 
   // Do the allocation of both objects in one go.
-  __ Allocate(r4,r3, r5, r6, &runtime,
+  __ Allocate(r4, r3, r5, r6, &runtime,
               static_cast<AllocationFlags>(TAG_OBJECT | SIZE_IN_WORDS));
 
   // Get the arguments boilerplate from the current native context.
@@ -5209,7 +5209,7 @@ void RegExpExecStub::Generate(MacroAssembler* masm) {
   __ JumpIfNotSmi(r4, &runtime);
   __ lwz(r6, FieldMemOperand(r6, String::kLengthOffset));
   __ cmp(r6, r4);
-  __ blt,(&runtime);
+  __ blt(&runtime);
   __ SmiUntag(r4);
 
   STATIC_ASSERT(4 == kOneByteStringTag);
@@ -5778,7 +5778,7 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
   __ lwz(jmp_reg, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
   __ lwz(jmp_reg, FieldMemOperand(jmp_reg,
                                   SharedFunctionInfo::kConstructStubOffset));
-   __ add(r0, jmp_reg, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ add(r0, jmp_reg, Operand(Code::kHeaderSize - kHeapObjectTag));
   __ Jump(r0);
 
   // r3: number of arguments
@@ -6885,7 +6885,8 @@ void StringAddStub::Generate(MacroAssembler* masm) {
   __ bne(&external_string2);
   STATIC_ASSERT(SeqOneByteString::kHeaderSize == SeqTwoByteString::kHeaderSize);
   __ add(r4, r4, Operand(SeqOneByteString::kHeaderSize - kHeapObjectTag));
-  // curious - on ARM the following branch is dependant on the flags from the add
+  // curious - on ARM the following branch is dependant on the flags
+  // from the add
   __ b(&second_prepared);
   // External string: rule out short external string and load string resource.
   STATIC_ASSERT(kShortExternalStringTag != 0);

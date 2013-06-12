@@ -1315,7 +1315,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
           reinterpret_cast<intptr_t>(redirection->external_function());
       if (fp_call) {
         double dval0, dval1;  // one or two double parameters
-        int32_t ival=0;       // zero or one integer parameters
+        int32_t ival = 0;     // zero or one integer parameters
         int64_t iresult = 0;  // integer return value
         double dresult = 0;   // double return value
         GetFpArgs(&dval0, &dval1, &ival);
@@ -2677,35 +2677,7 @@ void Simulator::Execute() {
 }
 
 
-int32_t Simulator::Call(byte* entry, int argument_count, ...) {
-  va_list parameters;
-  va_start(parameters, argument_count);
-  // Set up arguments
-
-  // First five arguments passed in registers. << probably wrong for PPC
-  ASSERT(argument_count >= 5);
-  set_register(r3, va_arg(parameters, int32_t));
-  set_register(r4, va_arg(parameters, int32_t));
-  set_register(r5, va_arg(parameters, int32_t));
-  set_register(r6, va_arg(parameters, int32_t));
-  set_register(r7, va_arg(parameters, int32_t));
-
-  // Remaining arguments passed on stack.
-  int original_stack = get_register(sp);
-  // Compute position of stack on entry to generated code.
-  int entry_stack = (original_stack - (argument_count - 4) * sizeof(int32_t)
-    - 8);  // -8 extra stack is a hack for the LR slot + old SP on PPC
-  if (OS::ActivationFrameAlignment() != 0) {
-    entry_stack &= -OS::ActivationFrameAlignment();
-  }
-  // Store remaining arguments on stack, from low to high memory.
-  intptr_t* stack_argument = reinterpret_cast<intptr_t*>(entry_stack);
-  for (int i = 4; i < argument_count; i++) {
-    stack_argument[i - 4] = va_arg(parameters, int32_t);
-  }
-  va_end(parameters);
-  set_register(sp, entry_stack);
-
+void Simulator::CallInternal(byte* entry) {
   // Prepare to execute the code at entry
   set_register(pc, reinterpret_cast<int32_t>(entry));
   // Put down marker for end of simulation. The simulator will stop simulation
@@ -2797,6 +2769,39 @@ int32_t Simulator::Call(byte* entry, int argument_count, ...) {
   set_register(r29, r29_val);
   set_register(r30, r30_val);
   set_register(fp, fp_val);
+}
+
+
+int32_t Simulator::Call(byte* entry, int argument_count, ...) {
+  va_list parameters;
+  va_start(parameters, argument_count);
+  // Set up arguments
+
+  // First five arguments passed in registers. << probably wrong for PPC
+  ASSERT(argument_count >= 5);
+  set_register(r3, va_arg(parameters, int32_t));
+  set_register(r4, va_arg(parameters, int32_t));
+  set_register(r5, va_arg(parameters, int32_t));
+  set_register(r6, va_arg(parameters, int32_t));
+  set_register(r7, va_arg(parameters, int32_t));
+
+  // Remaining arguments passed on stack.
+  int original_stack = get_register(sp);
+  // Compute position of stack on entry to generated code.
+  int entry_stack = (original_stack - (argument_count - 4) * sizeof(int32_t)
+    - 8);  // -8 extra stack is a hack for the LR slot + old SP on PPC
+  if (OS::ActivationFrameAlignment() != 0) {
+    entry_stack &= -OS::ActivationFrameAlignment();
+  }
+  // Store remaining arguments on stack, from low to high memory.
+  intptr_t* stack_argument = reinterpret_cast<intptr_t*>(entry_stack);
+  for (int i = 4; i < argument_count; i++) {
+    stack_argument[i - 4] = va_arg(parameters, int32_t);
+  }
+  va_end(parameters);
+  set_register(sp, entry_stack);
+
+  CallInternal(entry);
 
   // Pop stack passed arguments.
   CHECK_EQ(entry_stack, get_register(sp));
@@ -2804,6 +2809,27 @@ int32_t Simulator::Call(byte* entry, int argument_count, ...) {
 
   int32_t result = get_register(r3);   // PowerPC
   return result;
+}
+
+
+double Simulator::CallFP(byte* entry, double d0, double d1) {
+  if (use_eabi_hardfloat()) {
+    set_d_register_from_double(0, d0);
+    set_d_register_from_double(1, d1);
+  } else {
+    int buffer[2];
+    ASSERT(sizeof(buffer[0]) * 2 == sizeof(d0));
+    OS::MemCopy(buffer, &d0, sizeof(d0));
+    set_dw_register(0, buffer);
+    OS::MemCopy(buffer, &d1, sizeof(d1));
+    set_dw_register(2, buffer);
+  }
+  CallInternal(entry);
+  if (use_eabi_hardfloat()) {
+    return get_double_from_d_register(0);
+  } else {
+    return get_double_from_register_pair(0);
+  }
 }
 
 
