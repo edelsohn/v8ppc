@@ -3933,7 +3933,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
 #if defined(V8_HOST_ARCH_PPC)
   // PPC passes C++ objects by reference not value
   // Thus argument 2 (r4) should be the isolate
-  __ mov(r4, Operand(ExternalReference::isolate_address()));
+  __ mov(r4, Operand(ExternalReference::isolate_address(isolate)));
 #else
   __ mov(r5, Operand(ExternalReference::isolate_address(isolate)));
 #endif

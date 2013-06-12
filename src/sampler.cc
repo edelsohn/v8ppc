@@ -333,7 +333,11 @@ void SignalHandler::HandleProfilerSignal(int signal, siginfo_t* info,
 #else
   // Extracting the sample from the context is extremely machine dependent.
   ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
+#if V8_HOST_ARCH_PPC
+  mcontext_t& mcontext = *ucontext->uc_mcontext.uc_regs;
+#else
   mcontext_t& mcontext = ucontext->uc_mcontext;
+#endif
   sample->state = isolate->current_vm_state();
 #if defined(__linux__) || defined(__ANDROID__)
 #if V8_HOST_ARCH_IA32
@@ -362,6 +366,10 @@ void SignalHandler::HandleProfilerSignal(int signal, siginfo_t* info,
   sample->pc = reinterpret_cast<Address>(mcontext.pc);
   sample->sp = reinterpret_cast<Address>(mcontext.gregs[29]);
   sample->fp = reinterpret_cast<Address>(mcontext.gregs[30]);
+#elif V8_HOST_ARCH_PPC
+  sample->pc = reinterpret_cast<Address>(mcontext.gregs[15]);  // todo - fix
+  sample->sp = reinterpret_cast<Address>(mcontext.gregs[1]);
+  sample->fp = reinterpret_cast<Address>(mcontext.gregs[31]);
 #endif  // V8_HOST_ARCH_*
 #elif defined(__FreeBSD__)
 #if V8_HOST_ARCH_IA32
