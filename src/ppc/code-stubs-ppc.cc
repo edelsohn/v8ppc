@@ -3878,7 +3878,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
                               bool do_gc,
                               bool always_allocate) {
   // r3: result parameter for PerformGC, if any
-  // r14: number of arguments including receiver  (C callee-saved)
+  // r24: number of arguments including receiver  (C callee-saved)
   // r15: pointer to builtin function  (C callee-saved)
   // r16: pointer to the first argument (C callee-saved)
   Isolate* isolate = masm->isolate();
@@ -3899,19 +3899,10 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
     __ stw(r4, MemOperand(r3));
   }
 
-#if defined(V8_HOST_ARCH_PPC)
-  // Use frame storage reserved by calling function
-  // PPC passes C++ objects by reference not value
-  // This builds an object in the stack frame
-  __ stw(r24, MemOperand(sp, 2 * kPointerSize));
-  __ stw(r16, MemOperand(sp, 3 * kPointerSize));
-  __ add(r3, sp, Operand(2 * kPointerSize));
-#else
   // Call C built-in.
   // r3 = argc, r4 = argv
   __ mr(r3, r24);  // hack
   __ mr(r4, r16);
-#endif
 
 #if defined(V8_HOST_ARCH_ARM)  // this is never used -- may need
                                // something similar for PPC?
@@ -3930,13 +3921,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
   }
 #endif
 
-#if defined(V8_HOST_ARCH_PPC)
-  // PPC passes C++ objects by reference not value
-  // Thus argument 2 (r4) should be the isolate
-  __ mov(r4, Operand(ExternalReference::isolate_address(isolate)));
-#else
   __ mov(r5, Operand(ExternalReference::isolate_address(isolate)));
-#endif
 
   // To let the GC traverse the return address of the exit frames, we need to
   // know where the return address is. The CEntryStub is unmovable, so

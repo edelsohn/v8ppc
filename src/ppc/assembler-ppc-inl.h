@@ -228,7 +228,7 @@ void RelocInfo::set_target_cell(JSGlobalPropertyCell* cell,
 }
 
 
-static const int kNoCodeAgeSequenceLength = 8;
+static const int kNoCodeAgeSequenceLength = 7;
 
 Code* RelocInfo::code_age_stub() {
   ASSERT(rmode_ == RelocInfo::CODE_AGE_SEQUENCE);
@@ -490,31 +490,9 @@ Address Assembler::target_pointer_at(Address pc) {
 #endif
 }
 Address Assembler::target_address_from_return_address(Address pc) {
-#ifdef PENGUIN_CLEANUP
-  // Returns the address of the call target from the return address that will
-  // be returned to after a call.
-  // Call sequence on V7 or later is :
-  //  movw  ip, #... @ call address low 16
-  //  movt  ip, #... @ call address high 16
-  //  blx   ip
-  //                      @ return address
-  // Or pre-V7 or cases that need frequent patching:
-  //  ldr   ip, [pc, #...] @ call address
-  //  blx   ip
-  //                      @ return address
-  Address candidate = pc - 2 * Assembler::kInstrSize;
-  Instr candidate_instr(Memory::int32_at(candidate));
-  if (IsLdrPcImmediateOffset(candidate_instr)) {
-    return candidate;
-  }
-  candidate = pc - 3 * Assembler::kInstrSize;
-  ASSERT(IsMovW(Memory::int32_at(candidate)) &&
-         IsMovT(Memory::int32_at(candidate + kInstrSize)));
-  return candidate;
-#else
-  PPCPORT_UNIMPLEMENTED();
-  return pc;  // fake a return (unimplemented path)
-#endif
+  // call sequence is
+  // lis, addic, mtlr, blrl
+  return pc - 4 * Assembler::kInstrSize;
 }
 
 

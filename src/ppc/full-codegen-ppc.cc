@@ -174,7 +174,7 @@ void FullCodeGenerator::Generate() {
     // The following instructions must remain together and unmodified
     // for code aging to work properly.
     __ mflr(r0);
-    __ MultiPush(r1.bit() | cp.bit() | fp.bit() | r0.bit());
+    __ Push(r0, fp, cp, r4);
     // Load undefined value here, so the value is ready for the loop
     // below.
     __ LoadRoot(ip, Heap::kUndefinedValueRootIndex);
