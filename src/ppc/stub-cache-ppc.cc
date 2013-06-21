@@ -3063,10 +3063,13 @@ Handle<Code> BaseLoadStubCompiler::CompilePolymorphicIC(
   for (int current = 0; current < receiver_count; ++current) {
     Handle<Map> map = receiver_maps->at(current);
     if (!map->is_deprecated()) {
+      Label skip;
       number_of_handled_maps++;
       __ mov(ip, Operand(receiver_maps->at(current)));
       __ cmp(map_reg, ip);
-      __ Jump(handlers->at(current), RelocInfo::CODE_TARGET, eq);
+      __ bne(&skip);
+      __ Jump(handlers->at(current), RelocInfo::CODE_TARGET);
+      __ bind(&skip);
     }
   }
   ASSERT(number_of_handled_maps != 0);

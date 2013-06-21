@@ -301,7 +301,7 @@ struct SwVfpRegister {
 
 // Double word VFP register.
 struct DwVfpRegister {
-  static const int kMaxNumRegisters = 16;
+  static const int kMaxNumRegisters = 32;
   // A few double registers are reserved: one as a scratch register and one to
   // hold 0.0, that does not fit in the immediate field of vmov instructions.
   //  d14: 0.0
