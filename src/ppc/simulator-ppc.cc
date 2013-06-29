@@ -1979,6 +1979,20 @@ void Simulator::DecodeExt2(Instruction* instr) {
       }
       break;
     }
+    case LWZX:
+    case LWZUX: {
+      int rt = instr->RTValue();
+      int ra = instr->RAValue();
+      int rb = instr->RBValue();
+      int32_t ra_val = ra == 0 ? 0 : get_register(ra);
+      int32_t rb_val = get_register(rb);
+      set_register(rt, ReadW(ra_val+rb_val, instr));
+      if (opcode == LWZUX) {
+        ASSERT(ra != 0 && ra != rt);
+        set_register(ra, ra_val+rb_val);
+      }
+      break;
+    }
     default: {
       UNIMPLEMENTED();  // Not used by V8.
     }
@@ -2093,60 +2107,6 @@ void Simulator::DecodeExt4(Instruction* instr) {
   UNIMPLEMENTED();  // Not used by V8.
 }
 
-bool get_inv_op_vfp_flag(VFPRoundingMode mode,
-                         double val,
-                         bool unsigned_) {
-  ASSERT((mode == RN) || (mode == RM) || (mode == RZ));
-  double max_uint = static_cast<double>(0xffffffffu);
-  double max_int = static_cast<double>(kMaxInt);
-  double min_int = static_cast<double>(kMinInt);
-
-  // Check for NaN.
-  if (val != val) {
-    return true;
-  }
-
-  // Check for overflow. This code works because 32bit integers can be
-  // exactly represented by ieee-754 64bit floating-point values.
-  switch (mode) {
-    case RN:
-      return  unsigned_ ? (val >= (max_uint + 0.5)) ||
-                          (val < -0.5)
-                        : (val >= (max_int + 0.5)) ||
-                          (val < (min_int - 0.5));
-
-    case RM:
-      return  unsigned_ ? (val >= (max_uint + 1.0)) ||
-                          (val < 0)
-                        : (val >= (max_int + 1.0)) ||
-                          (val < min_int);
-
-    case RZ:
-      return  unsigned_ ? (val >= (max_uint + 1.0)) ||
-                          (val <= -1)
-                        : (val >= (max_int + 1.0)) ||
-                          (val <= (min_int - 1.0));
-    default:
-      UNREACHABLE();
-      return true;
-  }
-}
-
-
-// We call this function only if we had a vfp invalid exception.
-// It returns the correct saturated value.
-int VFPConversionSaturate(double val, bool unsigned_res) {
-  if (val != val) {
-    return 0;
-  } else {
-    if (unsigned_res) {
-      return (val < 0) ? 0 : 0xffffffffu;
-    } else {
-      return (val < 0) ? kMinInt : kMaxInt;
-    }
-  }
-}
-
 // Executes the current instruction.
 void Simulator::InstructionDecode(Instruction* instr) {
   if (v8::internal::FLAG_check_icache) {
@@ -2169,12 +2129,12 @@ void Simulator::InstructionDecode(Instruction* instr) {
       SoftwareInterrupt(instr);
       break;
     }
-    case MULLI:
     case SUBFIC: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
       int32_t ra_val = get_register(ra);
       int32_t im_val = instr->Bits(15, 0);
+      im_val = SIGN_EXT_IMM16(im_val);
       int32_t alu_out = im_val - ra_val;
       set_register(rt, alu_out);
       // todo - handle RC bit
@@ -2198,7 +2158,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int ra = instr->RAValue();
       int32_t ra_val = get_register(ra);
       int32_t im_val = instr->Bits(15, 0);
-      im_val = (im_val << 16) >> 16;  // sign extend if needed
+      im_val = SIGN_EXT_IMM16(im_val);
       int cr = instr->Bits(25, 23);
       int bf = 0;
       if (ra_val < im_val) { bf |= 0x80000000; }
@@ -2213,7 +2173,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
       int32_t ra_val = get_register(ra);
-      int32_t im_val = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t im_val = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int64_t alu_out = ra_val + im_val;
       if (alu_out >> 32) {
         alu_out &= 0xFFFFFFFF;
@@ -2224,11 +2184,10 @@ void Simulator::InstructionDecode(Instruction* instr) {
       set_register(rt, alu_out);
       break;
     }
-    case ADDICx:
     case ADDI: {
       int rt = instr->RTValue();
       int ra = instr->RAValue();
-      int32_t im_val = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t im_val = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int32_t alu_out;
       if (ra == 0) {
         alu_out = im_val;
@@ -2290,7 +2249,6 @@ void Simulator::InstructionDecode(Instruction* instr) {
       }
       break;
     }
-    case SC:
     case BX: {
       int offset = (instr->Bits(25, 2) << 8) >> 6;
       if (instr->Bit(0) == 1) {  // LK flag set
@@ -2373,7 +2331,6 @@ void Simulator::InstructionDecode(Instruction* instr) {
       }
       break;
     }
-    case RLWNMX:
     case ORI: {
       int rs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2441,7 +2398,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int ra = instr->RAValue();
       int rt = instr->RTValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       set_register(rt, ReadW(ra_val+offset, instr));
       if (opcode == LWZU) {
         ASSERT(ra != 0);
@@ -2455,7 +2412,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int ra = instr->RAValue();
       int rt = instr->RTValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       set_register(rt, ReadB(ra_val+offset) & 0xFF);
       if (opcode == LBZU) {
         ASSERT(ra != 0);
@@ -2470,7 +2427,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int rs = instr->RSValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       int32_t rs_val = get_register(rs);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       WriteW(ra_val+offset, rs_val, instr);
       if (opcode == STWU) {
         ASSERT(ra != 0);
@@ -2486,7 +2443,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int rs = instr->RSValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       int8_t rs_val = get_register(rs);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       WriteB(ra_val+offset, rs_val);
       if (opcode == STBU) {
         ASSERT(ra != 0);
@@ -2500,7 +2457,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int ra = instr->RAValue();
       int rt = instr->RTValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       uint32_t result = ReadHU(ra_val+offset, instr) & 0xffff;
       set_register(rt, result);
       if (opcode == LHZU) {
@@ -2522,7 +2479,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       int rs = instr->RSValue();
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       int16_t rs_val = get_register(rs);
-      int offset = (instr->Bits(15, 0) << 16) >> 16;
+      int offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       WriteH(ra_val+offset, rs_val, instr);
       if (opcode == STHU) {
         ASSERT(ra != 0);
@@ -2541,7 +2498,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     case LFS: {
      int frt = instr->RTValue();
       int ra = instr->RAValue();
-      int32_t offset = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       int32_t val = ReadW(ra_val + offset, instr);
       float *fptr = reinterpret_cast<float*>(&val);
@@ -2557,7 +2514,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     case LFD: {
       int frt = instr->RTValue();
       int ra = instr->RAValue();
-      int32_t offset = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       double *dptr = reinterpret_cast<double*>(ReadDW(ra_val + offset));
       set_d_register_from_double(frt, static_cast<double>(*dptr));
@@ -2572,7 +2529,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     case STFS:
       int frt = instr->RTValue();
       int ra = instr->RAValue();
-      int32_t offset = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       float frt_val = static_cast<float>(get_double_from_d_register(frt));
       int32_t *p=  reinterpret_cast<int32_t*>(&frt_val);
@@ -2587,7 +2544,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     case STFD: {
       int frt = instr->RTValue();
       int ra = instr->RAValue();
-      int32_t offset = (instr->Bits(15, 0) << 16) >> 16;
+      int32_t offset = SIGN_EXT_IMM16(instr->Bits(15, 0));
       int32_t ra_val = ra == 0 ? 0 : get_register(ra);
       double frt_val = get_double_from_d_register(frt);
       int32_t *p =  reinterpret_cast<int32_t *>(&frt_val);

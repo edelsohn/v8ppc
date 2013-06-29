@@ -57,7 +57,7 @@ unsigned CpuFeatures::found_by_runtime_probing_ = 0;
 
 #define EMIT_FAKE_ARM_INSTR(arm_opcode) fake_asm(arm_opcode);
 
-// #define NEW_IMM_CHECK_CODE
+#define NEW_IMM_CHECK_CODE
 
 // Get the CPU features enabled by the build. For cross compilation the
 // preprocessor symbols CAN_USE_ARMV7_INSTRUCTIONS and CAN_USE_VFP3_INSTRUCTIONS
@@ -960,6 +960,10 @@ void Assembler::nor(Register dst, Register src1, Register src2, RCBit r) {
   x_form(EXT2 | NORX, dst, src1, src2, r);
 }
 
+void Assembler::notx(Register dst, Register src, RCBit r) {
+  x_form(EXT2 | NORX, dst, src, src, r);
+}
+
 void Assembler::ori(Register ra, Register rs, const Operand& imm) {
   d_form(ORI, ra, rs, imm.imm32_, false);
 }
@@ -1027,52 +1031,62 @@ void Assembler::mr(Register dst, Register src) {
 
 void Assembler::lbz(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(LBZ, dst, src.ra_, src.offset_, true);
+  d_form(LBZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lhz(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(LHZ, dst, src.ra_, src.offset_, true);
+  d_form(LHZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lwz(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(LWZ, dst, src.ra_, src.offset_, true);
+  d_form(LWZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lwzu(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(LWZU, dst, src.ra_, src.offset_, true);
+  d_form(LWZU, dst, src.ra(), src.offset(), true);
+}
+
+void Assembler::lwzx(Register rt, Register ra, Register rb) {
+  ASSERT(!ra.is(r0));
+  emit(EXT2 | LWZX | rt.code()*B21 | ra.code()*B16 | rb.code()*B11 | LeaveRC);
+}
+
+void Assembler::lwzux(Register rt, Register ra, Register rb) {
+  ASSERT(!ra.is(r0));
+  emit(EXT2 | LWZUX | rt.code()*B21 | ra.code()*B16 | rb.code()*B11 | LeaveRC);
 }
 
 void Assembler::stb(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(STB, dst, src.ra_, src.offset_, true);
+  d_form(STB, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::sth(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(STH, dst, src.ra_, src.offset_, true);
+  d_form(STH, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::stw(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(STW, dst, src.ra_, src.offset_, true);
+  d_form(STW, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::stwu(Register dst, const MemOperand &src) {
   ASSERT(!src.ra_.is(r0));
-  d_form(STWU, dst, src.ra_, src.offset_, true);
+  d_form(STWU, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::stwx(Register rs, Register ra, Register rb) {
   ASSERT(!ra.is(r0));
-  x_form(EXT2 | STWX, rs, ra, rb, LeaveRC);
+  emit(EXT2 | STWX | rs.code()*B21 | ra.code()*B16 | rb.code()*B11 | LeaveRC);
 }
 
 void Assembler::stwux(Register rs, Register ra, Register rb) {
   ASSERT(!ra.is(r0));
-  x_form(EXT2 | STWUX, rs, ra, rb, LeaveRC);
+  emit(EXT2 | STWUX | rs.code()*B21 | ra.code()*B16 | rb.code()*B11 | LeaveRC);
 }
 
 void Assembler::extsb(Register rs, Register ra, RCBit rc) {
@@ -1186,37 +1200,6 @@ void Assembler::mov(Register dst, const Operand& src, SBit s, Condition cond) {
   }
 
   int value = src.imm32_;
-#if 0
-  // Generate variable length sequence.
-
-  // If this code is made active, code in MacroAssembler::CallSize
-  // must also be activated to handle variable length call sequences.
-
-  // N.B.: This is disable for now due to unresolved dependencies on
-  // Assembler::kCallTargetAddressOffset (which is hard-coded as 4
-  // instructions).
-
-  if (is_int16(value)) {
-    // PrintF("Generated li value: %d\n", value);
-    li(dst, Operand(value));
-  } else {
-    int hi_word = static_cast<int>(value) >> 16;
-    if ((hi_word << 16) == value) {
-      // PrintF("Generated addis value: %d\n", value);
-      lis(dst, Operand(SIGN_EXT_IMM16(hi_word)));
-    } else {
-      int lo_word = SIGN_EXT_IMM16(value);
-      if (lo_word & 0x8000) {
-        // lo word is signed, so increment hi word by one
-        hi_word++;
-      }
-      // ASSERT(dst.code() != 0);  // r0 is invalid destination eee
-      BlockConstPoolFor(2);  // don't split these
-      lis(dst, Operand(SIGN_EXT_IMM16(hi_word)));
-      addic(dst, dst, Operand(lo_word));
-    }
-  }
-#else
   int hi_word = static_cast<int>(value) >> 16;
   int lo_word = SIGN_EXT_IMM16(value);
   if (lo_word & 0x8000) {
@@ -1227,7 +1210,6 @@ void Assembler::mov(Register dst, const Operand& src, SBit s, Condition cond) {
   BlockConstPoolFor(2);  // don't split these
   lis(dst, Operand(SIGN_EXT_IMM16(hi_word)));
   addic(dst, dst, Operand(lo_word));
-#endif
 }
 
 void Assembler::bic(Register dst, Register src1, const Operand& src2,
@@ -1500,14 +1482,18 @@ void Assembler::svc(uint32_t imm24, Condition cond) {
 
 // Floating point support
 
-void Assembler::lfd(const DwVfpRegister frt, const Register ra, int offset) {
+void Assembler::lfd(const DwVfpRegister frt, const MemOperand &src) {
+  int offset = src.offset();
+  Register ra = src.ra();
   ASSERT(is_int16(offset));
   int imm16 = offset & kImm16Mask;
   // could be x_form instruction with some casting magic
   emit(LFD | frt.code()*B21 | ra.code()*B16 | imm16);
 }
 
-void Assembler::lfs(const DwVfpRegister frt, const Register ra, int offset) {
+void Assembler::lfs(const DwVfpRegister frt, const MemOperand &src) {
+  int offset = src.offset();
+  Register ra = src.ra();
   ASSERT(is_int16(offset));
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;
@@ -1515,7 +1501,9 @@ void Assembler::lfs(const DwVfpRegister frt, const Register ra, int offset) {
   emit(LFS | frt.code()*B21 | ra.code()*B16 | imm16);
 }
 
-void Assembler::stfd(const DwVfpRegister frs, const Register ra, int offset) {
+void Assembler::stfd(const DwVfpRegister frs, const MemOperand &src) {
+  int offset = src.offset();
+  Register ra = src.ra();
   ASSERT(is_int16(offset));
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;
@@ -1523,7 +1511,9 @@ void Assembler::stfd(const DwVfpRegister frs, const Register ra, int offset) {
   emit(STFD | frs.code()*B21 | ra.code()*B16 | imm16);
 }
 
-void Assembler::stfs(const DwVfpRegister frs, const Register ra, int offset) {
+void Assembler::stfs(const DwVfpRegister frs, const MemOperand &src) {
+  int offset = src.offset();
+  Register ra = src.ra();
   ASSERT(is_int16(offset));
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;

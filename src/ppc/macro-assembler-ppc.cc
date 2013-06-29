@@ -223,7 +223,7 @@ void MacroAssembler::Ret(Condition cond) {
 void MacroAssembler::Drop(int count, Condition cond) {
   ASSERT(cond == al);
   if (count > 0) {
-    addi(sp, sp, Operand(count * kPointerSize));
+    Add(sp, sp, count * kPointerSize, r0);
   }
 }
 
@@ -328,6 +328,7 @@ void MacroAssembler::Sbfx(Register dst, Register src1, int lsb, int width,
 
 void MacroAssembler::Usat(Register dst, int satpos, const Operand& src,
                           Condition cond) {
+#ifdef PENGUIN_CLEANUP
   if (!CpuFeatures::IsSupported(ARMv7) || predictable_code_size()) {
     ASSERT((satpos >= 0) && (satpos <= 31));
 
@@ -354,6 +355,10 @@ void MacroAssembler::Usat(Register dst, int satpos, const Operand& src,
   } else {
     usat(dst, satpos, src, cond);
   }
+#else
+  PPCPORT_UNIMPLEMENTED();
+  fake_asm(fMASM29);
+#endif
 }
 
 void MacroAssembler::MultiPush(RegList regs) {
@@ -873,12 +878,12 @@ void MacroAssembler::EnterFrame(StackFrame::Type type) {
 
 #if 0
   // r0-r3: preserved
-  stm(db_w, sp, cp.bit() | r11.bit() | lr.bit());
+  stm(db_w, sp, cp.bit() | fp.bit() | lr.bit());
   mov(ip, Operand(Smi::FromInt(type)));
   push(ip);
   mov(ip, Operand(CodeObject()));
   push(ip);
-  addi(r11, sp, Operand(3 * kPointerSize));  // Adjust FP to point to saved FP.
+  addi(fp, sp, Operand(3 * kPointerSize));  // Adjust FP to point to saved FP.
 #endif
 }
 
@@ -907,8 +912,8 @@ void MacroAssembler::LeaveFrame(StackFrame::Type type) {
 
   // Drop the execution stack down to the frame pointer and restore
   // the caller frame pointer and return address.
-  mr(sp, r11);
-  ldm(ia_w, sp, r11.bit() | lr.bit());
+  mr(sp, fp);
+  ldm(ia_w, sp, fp.bit() | lr.bit());
 #endif
 }
 
@@ -1034,7 +1039,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles,
   if (save_doubles) {
     // Calculate the stack location of the saved doubles and restore them.
     const int offset = 2 * kPointerSize;
-    sub(r3, r11, Operand(offset + DwVfpRegister::kNumRegisters * kDoubleSize));
+    sub(r3, fp, Operand(offset + DwVfpRegister::kNumRegisters * kDoubleSize));
     DwVfpRegister first = d0;
     DwVfpRegister last =
         DwVfpRegister::from_code(DwVfpRegister::kNumRegisters - 1);
@@ -1570,7 +1575,7 @@ void MacroAssembler::GetNumberHash(Register t0, Register scratch) {
   // with ComputeIntegerHash in utils.h.
   //
   // hash = ~hash + (hash << 15);
-  nor(scratch, t0, t0);
+  notx(scratch, t0);
   slwi(t0, t0, Operand(15));
   add(t0, scratch, t0);
   // hash = hash ^ (hash >> 12);
@@ -2164,7 +2169,7 @@ void MacroAssembler::StoreNumberToDoubleElements(Register value_reg,
                                           mantissa_reg,
                                           exponent_reg,
                                           d2);
-  stfd(d0, scratch1, 0);
+  stfd(d0, MemOperand(scratch1, 0));
 
   bind(&done);
 }
@@ -2462,7 +2467,7 @@ bool MacroAssembler::AllowThisStubCall(CodeStub* stub) {
 
 void MacroAssembler::IllegalOperation(int num_arguments) {
   if (num_arguments > 0) {
-    addi(sp, sp, Operand(num_arguments * kPointerSize));
+    Add(sp, sp, num_arguments * kPointerSize, r0);
   }
   LoadRoot(r0, Heap::kUndefinedValueRootIndex);
 }
@@ -2507,8 +2512,8 @@ void MacroAssembler::SmiToDoubleFPRegister(Register smi,
   xor_(r0, scratch1, r0);
   stw(r0, MemOperand(sp, 12));
 #endif
-  lfd(value, sp, 0);
-  lfd(scratch2, sp, 8);
+  lfd(value, MemOperand(sp, 0));
+  lfd(scratch2, MemOperand(sp, 8));
   addi(sp, sp, Operand(16));  // restore stack
   fsub(value, scratch2, value);
 }
@@ -2526,11 +2531,11 @@ void MacroAssembler::ConvertToInt32(Register source,
   addi(sp, sp, Operand(-2 * kPointerSize));
 
   // Retrieve double from heap
-  lfd(double_scratch, source, HeapNumber::kValueOffset-kHeapObjectTag);
+  lfd(double_scratch, FieldMemOperand(source, HeapNumber::kValueOffset));
 
   // Convert
   fctiwz(double_scratch, double_scratch);
-  stfd(double_scratch, sp, 0);
+  stfd(double_scratch, MemOperand(sp, 0));
 #if __FLOAT_WORD_ORDER == __LITTLE_ENDIAN
   lwz(dest, MemOperand(sp, 0));
 #else
@@ -3250,7 +3255,7 @@ void MacroAssembler::AllocateHeapNumberWithValue(Register result,
                                                  Register heap_number_map,
                                                  Label* gc_required) {
   AllocateHeapNumber(result, scratch1, scratch2, heap_number_map, gc_required);
-  stfd(value, result, HeapNumber::kValueOffset-kHeapObjectTag);
+  stfd(value, FieldMemOperand(result, HeapNumber::kValueOffset));
 }
 
 
@@ -3572,7 +3577,7 @@ void MacroAssembler::CallCFunctionHelper(Register function,
 #endif
   } else {
     // this case appears to never beused on PPC (even simulated)
-    addi(sp, sp, Operand(stack_passed_arguments * sizeof(kPointerSize)));
+    Add(sp, sp, stack_passed_arguments * sizeof(kPointerSize), r0);
   }
 }
 
@@ -3935,6 +3940,90 @@ void MacroAssembler::CheckEnumCache(Register null_value, Label* call_runtime) {
   bne(&next);
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// New MacroAssembler Interfaces added for PPC
+//
+////////////////////////////////////////////////////////////////////////////////
+void MacroAssembler::LoadSignedImmediate(Register dst, int value) {
+  if (is_int16(value)) {
+    li(dst, Operand(value));
+  } else {
+    int hi_word = static_cast<int>(value) >> 16;
+    if ((hi_word << 16) == value) {
+      lis(dst, Operand(hi_word));
+    } else {
+      mov(dst, Operand(value));
+    }
+  }
+}
+
+void MacroAssembler::Add(Register dst, Register src,
+                         uint32_t value, Register scratch) {
+  if (is_int16(value)) {
+    addi(dst, dst, Operand(value));
+  } else {
+    mov(scratch, Operand(value));
+    add(dst, dst, scratch);
+  }
+}
+
+// Variable length depending on whether offset fits into immediate field
+// MemOperand currently only supports d-form
+void MacroAssembler::LoadWord(Register dst, const MemOperand& mem,
+                              Register scratch, bool updateForm) {
+  Register base = mem.ra();
+  int offset = mem.offset();
+
+  bool use_dform = true;
+  if (!is_int16(offset)) {
+    use_dform = false;
+    LoadSignedImmediate(scratch, offset);
+  }
+
+  if (!updateForm) {
+    if (use_dform) {
+      lwz(dst, mem);
+    } else {
+      lwzx(dst, base, scratch);
+    }
+  } else {
+    if (use_dform) {
+      lwzu(dst, mem);
+    } else {
+      lwzux(dst, base, scratch);
+    }
+  }
+}
+
+// Variable length depending on whether offset fits into immediate field
+// MemOperand current only supports d-form
+void MacroAssembler::StoreWord(Register src, const MemOperand& mem,
+                               Register scratch, bool updateForm) {
+  Register base = mem.ra();
+  int offset = mem.offset();
+
+  bool use_dform = true;
+  if (!is_int16(offset)) {
+    use_dform = false;
+    LoadSignedImmediate(scratch, offset);
+  }
+
+  if (!updateForm) {
+    if (use_dform) {
+      stw(src, mem);
+    } else {
+      stwx(src, base, scratch);
+    }
+  } else {
+    if (use_dform) {
+      stwu(src, mem);
+    } else {
+      stwux(src, base, scratch);
+    }
+  }
+}
 
 #ifdef DEBUG
 bool AreAliased(Register reg1,

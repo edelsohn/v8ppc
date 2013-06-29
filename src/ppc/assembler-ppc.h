@@ -53,9 +53,6 @@ namespace internal {
 
 #define INCLUDE_ARM 1
 
-// sign-extend the least significant 16-bit of value <imm>
-#define SIGN_EXT_IMM16(imm) ((static_cast<int>(imm) << 16) >> 16)
-
 // CPU Registers.
 //
 // 1) We would prefer to use an enum, but enum values are assignment-
@@ -80,25 +77,23 @@ namespace internal {
 // Core register
 struct Register {
   static const int kNumRegisters = 32;
-  static const int kNumAllocatableRegisters = 12;
+  static const int kNumAllocatableRegisters = 10;  // r3-r12
   static const int kSizeInBytes = 4;
 
   static int ToAllocationIndex(Register reg) {
-    ASSERT(reg.code() < kNumAllocatableRegisters);
-    return reg.code();
+    int index = reg.code() - 3;  // r0-r2 are skipped
+    ASSERT(index < kNumAllocatableRegisters);
+    return index;
   }
 
   static Register FromAllocationIndex(int index) {
     ASSERT(index >= 0 && index < kNumAllocatableRegisters);
-    return from_code(index);
+    return from_code(index + 3);  // r0-r2 are skipped
   }
 
   static const char* AllocationIndexToString(int index) {
     ASSERT(index >= 0 && index < kNumAllocatableRegisters);
     const char* const names[] = {
-      "r0",
-      "r1",
-      "r2",
       "r3",
       "r4",
       "r5",
@@ -108,7 +103,7 @@ struct Register {
       "r9",
       "r10",
       "r11",
-      "r12",
+      "r12",  // currently last allocated register
       "r13",
       "r14",
       "r15",
@@ -127,7 +122,6 @@ struct Register {
       "r28",
       "r29",
       "r30",
-      "fp",
     };
     return names[index];
   }
@@ -781,35 +775,27 @@ class Assembler : public AssemblerBase {
   // Distance between start of patched return sequence and the emitted address
   // to jump to.
   // Patched return sequence is:
-  //  mov  lr, pc         @ start of sequence
-  //  ldr  pc, [pc, #-4]  @ emited address
-#if 0
-  static const int kPatchReturnSequenceAddressOffset =  kInstrSize;
-#else
+  //   lis r0, <address hi>
+  //   addic r0, r0, <address lo>
+  //   mtlr r0
+  //   blrl
   static const int kPatchReturnSequenceAddressOffset =  0 * kInstrSize;
-#endif
 
   // Distance between start of patched debug break slot and the emitted address
   // to jump to.
   // Patched debug break slot code is:
-  //  mov  lr, pc         @ start of sequence
-  //  ldr  pc, [pc, #-4]  @ emited address
-#if 0
-  static const int kPatchDebugBreakSlotAddressOffset =  kInstrSize;
-#else
+  //   lis r0, <address hi>
+  //   addic r0, r0, <address lo>
+  //   mtlr r0
+  //   blrl
   static const int kPatchDebugBreakSlotAddressOffset =  0 * kInstrSize;
-#endif
 
   // Difference between address of current opcode and value read from pc
   // register.
-  static const int kPcLoadDelta = 6 * 4;
+  static const int kPcLoadDelta = 0;  // Todo: remove
 
-#if 0
-  static const int kJSReturnSequenceInstructions = 4;
-#else
-  static const int kJSReturnSequenceInstructions = 5;
-#endif
-  static const int kDebugBreakSlotInstructions = 4;
+  static const int kJSReturnSequenceInstructions = 6;
+  static const int kDebugBreakSlotInstructions = 5;
   static const int kDebugBreakSlotLength =
       kDebugBreakSlotInstructions * kInstrSize;
 
@@ -851,6 +837,9 @@ class Assembler : public AssemblerBase {
   void b(Condition cond, Label* L, CRegister cr = cr7)  {
     ASSERT(cr.code() >= 0 && cr.code() <= 7);
     switch (cond) {
+      case al:
+        b(L);
+        break;
       case eq:
         bc(branch_offset(L, false), BT, 2 + (cr.code() * 4));
         break;
@@ -942,6 +931,7 @@ class Assembler : public AssemblerBase {
   void andi(Register ra, Register rs, const Operand& imm);
   void andis(Register ra, Register rs, const Operand& imm);
   void nor(Register dst, Register src1, Register src2, RCBit r = LeaveRC);
+  void notx(Register dst, Register src, RCBit r = LeaveRC);
   void ori(Register dst, Register src, const Operand& imm);
   void oris(Register dst, Register src, const Operand& imm);
   void orx(Register dst, Register src1, Register src2, RCBit r = LeaveRC);
@@ -955,6 +945,8 @@ class Assembler : public AssemblerBase {
   void lhz(Register dst, const MemOperand& src);
   void lwz(Register dst, const MemOperand& src);
   void lwzu(Register dst, const MemOperand& src);
+  void lwzx(Register dst, Register ra, Register rb);
+  void lwzux(Register dst, Register ra, Register rb);
   void stb(Register dst, const MemOperand& src);
   void sth(Register dst, const MemOperand& src);
   void stw(Register dst, const MemOperand& src);
@@ -1138,10 +1130,10 @@ class Assembler : public AssemblerBase {
   void svc(uint32_t imm24, Condition cond = al);
 
   // Support for floating point
-  void lfd(const DwVfpRegister frt, const Register ra, int offset);
-  void lfs(const DwVfpRegister frt, const Register ra, int offset);
-  void stfd(const DwVfpRegister frs, const Register ra, int offset);
-  void stfs(const DwVfpRegister frs, const Register ra, int offset);
+  void lfd(const DwVfpRegister frt, const MemOperand& src);
+  void lfs(const DwVfpRegister frt, const MemOperand& src);
+  void stfd(const DwVfpRegister frs, const MemOperand& src);
+  void stfs(const DwVfpRegister frs, const MemOperand& src);
   void fadd(const DwVfpRegister frt, const DwVfpRegister fra,
             const DwVfpRegister frb, RCBit rc = LeaveRC);
   void fsub(const DwVfpRegister frt, const DwVfpRegister fra,
@@ -1548,13 +1540,6 @@ class Assembler : public AssemblerBase {
   void x_form(Instr instr, Register ra, Register rs, Register rb, RCBit r);
   void xo_form(Instr instr, Register rt, Register ra, Register rb,
                OEBit o, RCBit r);
-#if defined(INCLUDE_ARM)
-  void addrmod1(Instr instr, Register rn, Register rd, const Operand& x);
-  void addrmod2(Instr instr, Register rd, const MemOperand& x);
-  void addrmod3(Instr instr, Register rd, const MemOperand& x);
-  void addrmod4(Instr instr, Register rn, RegList rl);
-  void addrmod5(Instr instr, CRegister crd, const MemOperand& x);
-#endif  // INCLUDE_ARM
 
   // Labels
   void print(Label* L);
