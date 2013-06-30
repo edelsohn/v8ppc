@@ -1,7 +1,7 @@
 v8ppc
 =====
 
-Port of Google V8 javascript engine to PowerPC
+Port of Google V8 javascript engine to PowerPC - PowerLinux and AIX.
 
 June 11th 88% of the tests were passing. 
 
