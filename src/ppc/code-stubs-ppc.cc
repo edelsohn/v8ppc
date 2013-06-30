@@ -4208,6 +4208,11 @@ void JSEntryStub::GenerateBody(MacroAssembler* masm, bool is_construct) {
   // oldSP  (value)
   //        LR reserved
   //
+
+#ifdef _AIX
+  __ function_descriptor();
+#endif
+
   __ stwu(sp, MemOperand(sp, -(22*4)));
   __ mflr(r0);
   __ stw(r0, MemOperand(sp, 92));  // use pre-reserved LR slot
