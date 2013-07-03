@@ -301,7 +301,7 @@ void StubCompiler::GenerateLoadGlobalFunctionPrototype(MacroAssembler* masm,
   __ lwz(prototype,
          FieldMemOperand(prototype, GlobalObject::kNativeContextOffset));
   // Load the function from the native context.
-  __ lwz(prototype, MemOperand(prototype, Context::SlotOffset(index)));
+  __ LoadWord(prototype, MemOperand(prototype, Context::SlotOffset(index)), r0);
   // Load the initial map.  The global functions all have initial maps.
   __ lwz(prototype,
          FieldMemOperand(prototype, JSFunction::kPrototypeOrInitialMapOffset));
@@ -349,12 +349,12 @@ void StubCompiler::GenerateFastPropertyLoad(MacroAssembler* masm,
   if (index < 0) {
     // Get the property straight out of the holder.
     int offset = holder->map()->instance_size() + (index * kPointerSize);
-    __ lwz(dst, FieldMemOperand(src, offset));
+    __ LoadWord(dst, FieldMemOperand(src, offset), r0);
   } else {
     // Calculate the offset into the properties array.
     int offset = index * kPointerSize + FixedArray::kHeaderSize;
     __ lwz(dst, FieldMemOperand(src, JSObject::kPropertiesOffset));
-    __ lwz(dst, FieldMemOperand(dst, offset));
+    __ LoadWord(dst, FieldMemOperand(dst, offset), r0);
   }
 }
 
@@ -561,7 +561,7 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
   if (index < 0) {
     // Set the property straight into the object.
     int offset = object->map()->instance_size() + (index * kPointerSize);
-    __ stw(r3, FieldMemOperand(receiver_reg, offset));
+    __ StoreWord(r3, FieldMemOperand(receiver_reg, offset), r0);
 
     // Skip updating write barrier if storing a smi.
     __ JumpIfSmi(r3, &exit);
@@ -581,7 +581,7 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
     // Get the properties array
     __ lwz(scratch1,
            FieldMemOperand(receiver_reg, JSObject::kPropertiesOffset));
-    __ stw(r3, FieldMemOperand(scratch1, offset));
+    __ StoreWord(r3, FieldMemOperand(scratch1, offset), r0);
 
     // Skip updating write barrier if storing a smi.
     __ JumpIfSmi(r3, &exit);
@@ -634,7 +634,7 @@ static void GenerateCallFunction(MacroAssembler* masm,
   // necessary.
   if (object->IsGlobalObject()) {
     __ lwz(r6, FieldMemOperand(r3, GlobalObject::kGlobalReceiverOffset));
-    __ stw(r6, MemOperand(sp, arguments.immediate() * kPointerSize));
+    __ StoreWord(r6, MemOperand(sp, arguments.immediate() * kPointerSize), r0);
   }
 
   // Invoke the function.
@@ -1451,7 +1451,7 @@ void CallStubCompiler::GenerateGlobalReceiverCheck(Handle<JSObject> object,
   const int argc = arguments().immediate();
 
   // Get the receiver from the stack.
-  __ lwz(r3, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r3, MemOperand(sp, argc * kPointerSize), r0);
 
   // Check that the maps haven't changed.
   __ JumpIfSmi(r3, miss);
@@ -1520,7 +1520,7 @@ Handle<Code> CallStubCompiler::CompileCallField(Handle<JSObject> object,
   const int argc = arguments().immediate();
 
   // Get the receiver of the function from the stack into r3.
-  __ lwz(r3, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r3, MemOperand(sp, argc * kPointerSize), r0);
   // Check that the receiver isn't a smi.
   __ JumpIfSmi(r3, &miss);
 
@@ -1564,7 +1564,7 @@ Handle<Code> CallStubCompiler::CompileArrayPushCall(
   Register receiver = r4;
   // Get the receiver from the stack
   const int argc = arguments().immediate();
-  __ lwz(receiver, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(receiver, MemOperand(sp, argc * kPointerSize), r0);
 
   // Check that the receiver isn't a smi.
   __ JumpIfSmi(receiver, &miss);
@@ -1612,7 +1612,7 @@ Handle<Code> CallStubCompiler::CompileArrayPushCall(
 
       // Check if value is a smi.
       Label with_write_barrier;
-      __ lwz(r7, MemOperand(sp, (argc - 1) * kPointerSize));
+      __ LoadWord(r7, MemOperand(sp, (argc - 1) * kPointerSize), r0);
       __ JumpIfNotSmi(r7, &with_write_barrier);
 
       // Save new length.
@@ -1699,7 +1699,7 @@ Handle<Code> CallStubCompiler::CompileArrayPushCall(
         __ b(&call_builtin);
       }
 
-      __ lwz(r5, MemOperand(sp, (argc - 1) * kPointerSize));
+      __ LoadWord(r5, MemOperand(sp, (argc - 1) * kPointerSize), r0);
       // Growing elements that are SMI-only requires special handling in case
       // the new element is non-Smi. For now, delegate to the builtin.
       Label no_fast_elements_check;
@@ -1738,7 +1738,7 @@ Handle<Code> CallStubCompiler::CompileArrayPushCall(
       // Fill the rest with holes.
       __ LoadRoot(r6, Heap::kTheHoleValueRootIndex);
       for (int i = 1; i < kAllocationDelta; i++) {
-        __ stw(r6, MemOperand(end_elements, i * kPointerSize));
+        __ StoreWord(r6, MemOperand(end_elements, i * kPointerSize), r0);
       }
 
       // Update elements' and array's sizes.
@@ -1792,7 +1792,7 @@ Handle<Code> CallStubCompiler::CompileArrayPopCall(
 
   // Get the receiver from the stack
   const int argc = arguments().immediate();
-  __ lwz(receiver, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(receiver, MemOperand(sp, argc * kPointerSize), r0);
   // Check that the receiver isn't a smi.
   __ JumpIfSmi(receiver, &miss);
 
@@ -1900,9 +1900,9 @@ Handle<Code> CallStubCompiler::CompileStringCharCodeAtCall(
   Register receiver = r4;
   Register index = r7;
   Register result = r3;
-  __ lwz(receiver, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(receiver, MemOperand(sp, argc * kPointerSize), r0);
   if (argc > 0) {
-    __ lwz(index, MemOperand(sp, (argc - 1) * kPointerSize));
+    __ LoadWord(index, MemOperand(sp, (argc - 1) * kPointerSize), r0);
   } else {
     __ LoadRoot(index, Heap::kUndefinedValueRootIndex);
   }
@@ -1983,9 +1983,9 @@ Handle<Code> CallStubCompiler::CompileStringCharAtCall(
   Register index = r7;
   Register scratch = r6;
   Register result = r3;
-  __ lwz(receiver, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(receiver, MemOperand(sp, argc * kPointerSize), r0);
   if (argc > 0) {
-    __ lwz(index, MemOperand(sp, (argc - 1) * kPointerSize));
+    __ LoadWord(index, MemOperand(sp, (argc - 1) * kPointerSize), r0);
   } else {
     __ LoadRoot(index, Heap::kUndefinedValueRootIndex);
   }
@@ -2166,14 +2166,14 @@ Handle<Code> CallStubCompiler::CompileMathFloorCall(
   __ addi(sp, sp, Operand(8));
 
   // if resulting conversion is negative, invert for bit tests
-  __ rlwinm(r0, r3, 1, 31, 31, SetRC);
+  __ TestBit(r3, 0, r0);  // test sign bit
   __ mr(r0, r3);
   __ beq(&positive, cr0);
   __ neg(r0, r3);
   __ bind(&positive);
 
   // if either of the high two bits are set, fail to generic
-  __ rlwinm(r0, r0, 2, 30, 31, SetRC);
+  __ TestBitRange(r0, 0, 1, r0);
   __ bne(&slow, cr0);
 
   // Tag the result.
@@ -2186,7 +2186,7 @@ Handle<Code> CallStubCompiler::CompileMathFloorCall(
 
   __ lwz(r4, MemOperand(sp, 0 * kPointerSize));
   __ lwz(r4, FieldMemOperand(r4, HeapNumber::kExponentOffset));
-  __ rlwinm(r0, r4, 1, 31, 31, SetRC);
+  __ TestBit(r4, 0, r0);  // test sign bit
   __ beq(&drop_arg_return, cr0);
   // If our HeapNumber is negative it was -0, so load its address and return.
   __ lwz(r3, MemOperand(sp));
@@ -2339,7 +2339,7 @@ Handle<Code> CallStubCompiler::CompileFastApiCall(
 
   // Get the receiver from the stack.
   const int argc = arguments().immediate();
-  __ lwz(r4, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r4, MemOperand(sp, argc * kPointerSize), r0);
 
   // Check that the receiver isn't a smi.
   __ JumpIfSmi(r4, &miss_before_stack_reserved);
@@ -2396,7 +2396,7 @@ Handle<Code> CallStubCompiler::CompileCallConstant(Handle<Object> object,
 
   // Get the receiver from the stack
   const int argc = arguments().immediate();
-  __ lwz(r4, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r4, MemOperand(sp, argc * kPointerSize), r0);
 
   // Check that the receiver isn't a smi.
   if (check != NUMBER_CHECK) {
@@ -2520,7 +2520,7 @@ Handle<Code> CallStubCompiler::CompileCallInterceptor(Handle<JSObject> object,
   LookupPostInterceptor(holder, name, &lookup);
 
   // Get the receiver from the stack.
-  __ lwz(r4, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r4, MemOperand(sp, argc * kPointerSize), r0);
 
   CallInterceptorCompiler compiler(this, arguments(), r5, extra_state_);
   compiler.Compile(masm(), object, holder, name, &lookup, r4, r6, r7, r3,
@@ -2529,7 +2529,7 @@ Handle<Code> CallStubCompiler::CompileCallInterceptor(Handle<JSObject> object,
   // Move returned value, the function to call, to r4.
   __ mr(r4, r3);
   // Restore receiver.
-  __ lwz(r3, MemOperand(sp, argc * kPointerSize));
+  __ LoadWord(r3, MemOperand(sp, argc * kPointerSize), r0);
 
   GenerateCallFunction(masm(), object, arguments(), &miss, extra_state_);
 
@@ -2572,7 +2572,7 @@ Handle<Code> CallStubCompiler::CompileCallGlobal(
   // necessary.
   if (object->IsGlobalObject()) {
     __ lwz(r6, FieldMemOperand(r3, GlobalObject::kGlobalReceiverOffset));
-    __ stw(r6, MemOperand(sp, argc * kPointerSize));
+    __ StoreWord(r6, MemOperand(sp, argc * kPointerSize), r0);
   }
 
   // Set up the context (function already in r4).
@@ -3535,7 +3535,7 @@ Handle<Code> ConstructStubCompiler::CompileConstructStub(
       __ cmpi(r3, Operand(arg_number));
       __ ble(&not_passed);
       // Argument passed - find it on the stack.
-      __ lwz(r5, MemOperand(r4, (arg_number + 1) * -kPointerSize));
+      __ LoadWord(r5, MemOperand(r4, (arg_number + 1) * -kPointerSize), r0);
       __ stw(r5, MemOperand(r8));
       __ addi(r8, r8, Operand(kPointerSize));
       __ b(&next);
@@ -3818,7 +3818,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
     // the value can be represented in a Smi. If not, we need to convert
     // it to a HeapNumber.
     Label box_int, smi_ok;
-    __ rlwinm(r0, value, 2, 30, 31, SetRC);
+    __ TestBitRange(value, 0, 1, r0);
     __ beq(&smi_ok, cr0);     // If both high bits are clear smi is ok
     __ cmpi(r0, Operand(3));
     __ bne(&box_int);         // If both high bits are not set, we box it
@@ -3848,7 +3848,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
     // the value to be in the range of a positive smi, we can't
     // handle either of the top two bits being set in the value.
     Label box_int;
-    __ rlwinm(r0, value, 2, 30, 31, SetRC);
+    __ TestBitRange(value, 0, 1, r0);
     __ bne(&box_int, cr0);   // If either two high bits are set, box
 
     // Tag integer as smi and return it.
@@ -4390,7 +4390,8 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(
     __ stw(scratch, FieldMemOperand(elements_reg, FixedArray::kLengthOffset));
     __ LoadRoot(scratch, Heap::kTheHoleValueRootIndex);
     for (int i = 1; i < JSArray::kPreallocatedArrayElements; ++i) {
-      __ stw(scratch, FieldMemOperand(elements_reg, FixedArray::SizeFor(i)));
+      __ StoreWord(scratch,
+         FieldMemOperand(elements_reg, FixedArray::SizeFor(i)), r0);
     }
 
     // Store the element at index zero.

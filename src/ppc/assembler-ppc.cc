@@ -238,30 +238,15 @@ Operand::Operand(Register rm, ShiftOp shift_op, Register rs) {
 
 MemOperand::MemOperand(Register rn, int32_t offset, AddrMode am) {
   ra_ = rn;
-  rm_ = no_reg;
   offset_ = offset;
-  am_ = am;
+  validPPCAddressing_ = true;
 }
 
-MemOperand::MemOperand(Register rn, Register rm, AddrMode am) {
-  ra_ = rn;
-  rm_ = rm;
-  shift_op_ = LSL;
-  shift_imm_ = 0;
-  am_ = am;
-}
-
-
+// todo (penguin): arm-addressing, remove after all arm codes are converted
 MemOperand::MemOperand(Register rn, Register rm,
                        ShiftOp shift_op, int shift_imm, AddrMode am) {
-  ASSERT(is_uint5(shift_imm));
-  ra_ = rn;
-  rm_ = rm;
-  shift_op_ = shift_op;
-  shift_imm_ = shift_imm & 31;
-  am_ = am;
+  validPPCAddressing_ = false;
 }
-
 
 // -----------------------------------------------------------------------------
 // Specific instructions, constants, and masks.
@@ -847,14 +832,23 @@ void Assembler::rlwimi(Register ra, Register rs,
   emit(RLWIMIX | rs.code()*B21 | ra.code()*B16 | sh*B11 | mb*B6 | me << 1 | rc);
 }
 
-void Assembler::slwi(Register dst, Register src, const Operand& val) {
+void Assembler::slwi(Register dst, Register src, const Operand& val,
+                     RCBit rc) {
   ASSERT((32 > val.imm32_)&&(val.imm32_ >= 0));
-  rlwinm(dst, src, val.imm32_, 0, 31-val.imm32_);
+  rlwinm(dst, src, val.imm32_, 0, 31-val.imm32_, rc);
 }
-void Assembler::srwi(Register dst, Register src, const Operand& val) {
+void Assembler::srwi(Register dst, Register src, const Operand& val,
+                     RCBit rc) {
   ASSERT((32 > val.imm32_)&&(val.imm32_ >= 0));
-  rlwinm(dst, src, 32-val.imm32_, val.imm32_, 31);
+  rlwinm(dst, src, 32-val.imm32_, val.imm32_, 31, rc);
 }
+void Assembler::clrrwi(Register dst, Register src, const Operand& val,
+                       RCBit rc) {
+  ASSERT((32 > val.imm32_)&&(val.imm32_ >= 0));
+  rlwinm(dst, src, 0, 0, 31-val.imm32_, rc);
+}
+
+
 void Assembler::srawi(Register ra, Register rs, int sh, RCBit r) {
   CheckBuffer();
   emit(EXT2 | SRAWIX | rs.code()*B21 | ra.code()*B16 | sh*B11 | r);
@@ -1030,22 +1024,22 @@ void Assembler::mr(Register dst, Register src) {
 }
 
 void Assembler::lbz(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(LBZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lhz(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(LHZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lwz(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(LWZ, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::lwzu(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(LWZU, dst, src.ra(), src.offset(), true);
 }
 
@@ -1060,22 +1054,22 @@ void Assembler::lwzux(Register rt, Register ra, Register rb) {
 }
 
 void Assembler::stb(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(STB, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::sth(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(STH, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::stw(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(STW, dst, src.ra(), src.offset(), true);
 }
 
 void Assembler::stwu(Register dst, const MemOperand &src) {
-  ASSERT(!src.ra_.is(r0));
+  ASSERT(!src.ra_.is(r0) && src.isPPCAddressing());
   d_form(STWU, dst, src.ra(), src.offset(), true);
 }
 
@@ -1460,12 +1454,13 @@ void Assembler::stm(BlockAddrMode am,
 // Exception-generating instructions and debugging support.
 // Stops with a non-negative code less than kNumOfWatchedStops support
 // enabling/disabling and a counter feature. See simulator-arm.h .
-void Assembler::stop(const char* msg, Condition cond, int32_t code) {
+void Assembler::stop(const char* msg, Condition cond, int32_t code,
+                     CRegister cr) {
   // PPCPORT_CHECK(false);
   // EMIT_FAKE_ARM_INSTR(fSTOP);
   if (cond != al) {
     Label skip;
-    b(&skip, NegateCondition(cond));
+    b(NegateCondition(cond), &skip, cr);
     bkpt(0);
     bind(&skip);
   } else {
@@ -1495,7 +1490,7 @@ void Assembler::svc(uint32_t imm24, Condition cond) {
 void Assembler::lfd(const DwVfpRegister frt, const MemOperand &src) {
   int offset = src.offset();
   Register ra = src.ra();
-  ASSERT(is_int16(offset));
+  ASSERT(is_int16(offset) && src.isPPCAddressing());
   int imm16 = offset & kImm16Mask;
   // could be x_form instruction with some casting magic
   emit(LFD | frt.code()*B21 | ra.code()*B16 | imm16);
@@ -1504,7 +1499,7 @@ void Assembler::lfd(const DwVfpRegister frt, const MemOperand &src) {
 void Assembler::lfs(const DwVfpRegister frt, const MemOperand &src) {
   int offset = src.offset();
   Register ra = src.ra();
-  ASSERT(is_int16(offset));
+  ASSERT(is_int16(offset) && src.isPPCAddressing());
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;
   // could be x_form instruction with some casting magic
@@ -1514,7 +1509,7 @@ void Assembler::lfs(const DwVfpRegister frt, const MemOperand &src) {
 void Assembler::stfd(const DwVfpRegister frs, const MemOperand &src) {
   int offset = src.offset();
   Register ra = src.ra();
-  ASSERT(is_int16(offset));
+  ASSERT(is_int16(offset) && src.isPPCAddressing());
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;
   // could be x_form instruction with some casting magic
@@ -1524,7 +1519,7 @@ void Assembler::stfd(const DwVfpRegister frs, const MemOperand &src) {
 void Assembler::stfs(const DwVfpRegister frs, const MemOperand &src) {
   int offset = src.offset();
   Register ra = src.ra();
-  ASSERT(is_int16(offset));
+  ASSERT(is_int16(offset) && src.isPPCAddressing());
   ASSERT(!ra.is(r0));
   int imm16 = offset & kImm16Mask;
   // could be x_form instruction with some casting magic

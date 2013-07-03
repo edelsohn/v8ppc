@@ -415,14 +415,15 @@ void MacroAssembler::MultiPop(RegList regs) {
 void MacroAssembler::LoadRoot(Register destination,
                               Heap::RootListIndex index,
                               Condition cond) {
-  lwz(destination, MemOperand(kRootRegister, index << kPointerSizeLog2));
+  LoadWord(destination, MemOperand(kRootRegister,
+           index << kPointerSizeLog2), r0);
 }
 
 
 void MacroAssembler::StoreRoot(Register source,
                                Heap::RootListIndex index,
                                Condition cond) {
-  stw(source, MemOperand(kRootRegister, index << kPointerSizeLog2));
+  StoreWord(source, MemOperand(kRootRegister, index << kPointerSizeLog2), r0);
 }
 
 
@@ -1014,7 +1015,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space) {
   sub(sp, sp, Operand((stack_space + 1 + 1) * kPointerSize));
   if (frame_alignment > 0) {
     ASSERT(frame_alignment == 8);
-    rlwinm(sp, sp, 0, 0, 28);  // equivalent to &= -8
+    clrrwi(sp, sp, Operand(3));  // equivalent to &= -8
   }
 
   // Set the exit frame sp value to point just before the return address
@@ -1778,7 +1779,7 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
       Check(eq, "Unexpected allocation top");
     }
     // Load allocation limit into ip. Result already contains allocation top.
-    lwz(ip, MemOperand(topaddr, limit - top));
+    LoadWord(ip, MemOperand(topaddr, limit - top), r0);
   }
 
   // Calculate new top and bail out if new space is exhausted. Use result
@@ -2640,7 +2641,7 @@ void MacroAssembler::EmitOutOfInt32RangeTruncate(Register result,
   // check for NaN or +/-Infinity
   // by extracting exponent (mask: 0x7ff00000)
   STATIC_ASSERT(HeapNumber::kExponentMask == 0x7ff00000u);
-  rlwinm(scratch, input_high, 12, 21, 31, LeaveRC);
+  ExtractBitMask(scratch, input_high, HeapNumber::kExponentMask);
   cmpli(scratch, Operand(0x7ff));
   beq(&done);
 
@@ -2662,7 +2663,7 @@ void MacroAssembler::EmitOutOfInt32RangeTruncate(Register result,
   STATIC_ASSERT(HeapNumber::kSignMask == 0x80000000u);
   Register sign = result;
   result = no_reg;
-  rlwinm(sign, input_high, 0, 0, 0, LeaveRC);
+  ExtractBit(sign, input_high, 0);
 
   // Shifts >= 32 bits should result in zero.
   // slw extracts only the 6 most significant bits of the shift value.
@@ -2879,8 +2880,8 @@ void MacroAssembler::GetBuiltinFunction(Register target,
       MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
   lwz(target, FieldMemOperand(target, GlobalObject::kBuiltinsOffset));
   // Load the JavaScript builtin function from the builtins object.
-  lwz(target, FieldMemOperand(target,
-                          JSBuiltinsObject::OffsetOfFunctionWithId(id)));
+  LoadWord(target, FieldMemOperand(target,
+                   JSBuiltinsObject::OffsetOfFunctionWithId(id)), r0);
 }
 
 
@@ -3096,7 +3097,7 @@ void MacroAssembler::LoadGlobalFunction(int index, Register function) {
   lwz(function, FieldMemOperand(function,
                                 GlobalObject::kNativeContextOffset));
   // Load the function from the native context.
-  lwz(function, MemOperand(function, Context::SlotOffset(index)));
+  LoadWord(function, MemOperand(function, Context::SlotOffset(index)), r0);
 }
 
 
@@ -3155,7 +3156,7 @@ void MacroAssembler::UntagAndJumpIfSmi(
     Register dst, Register src, Label* smi_case) {
   STATIC_ASSERT(kSmiTag == 0);
   STATIC_ASSERT(kSmiTagSize == 1);
-  rlwinm(r0, src, 0, 31, 31, SetRC);
+  TestBit(src, 31, r0);
   srawi(dst, src, kSmiTagSize);
   beq(smi_case, cr0);
 }
@@ -3165,7 +3166,7 @@ void MacroAssembler::UntagAndJumpIfNotSmi(
     Register dst, Register src, Label* non_smi_case) {
   STATIC_ASSERT(kSmiTag == 0);
   STATIC_ASSERT(kSmiTagSize == 1);
-  rlwinm(r0, src, 0, 31, 31, SetRC);
+  TestBit(src, 31, r0);
   srawi(dst, src, kSmiTagSize);
   bne(non_smi_case, cr0);
 }
@@ -3318,8 +3319,8 @@ void MacroAssembler::CopyFields(Register dst,
   ASSERT(!tmp.is(no_reg));
 
   for (int i = 0; i < field_count; i++) {
-    lwz(tmp, FieldMemOperand(src, i * kPointerSize));
-    stw(tmp, FieldMemOperand(dst, i * kPointerSize));
+    LoadWord(tmp, FieldMemOperand(src, i * kPointerSize), r0);
+    StoreWord(tmp, FieldMemOperand(dst, i * kPointerSize), r0);
   }
 }
 
@@ -3404,7 +3405,7 @@ void MacroAssembler::InitializeFieldsWithFiller(Register start_offset,
   Label loop, entry;
   b(&entry);
   bind(&loop);
-  stw(filler, MemOperand(start_offset));
+  StoreWord(filler, MemOperand(start_offset), r0);
   addi(start_offset, start_offset, Operand(kPointerSize));
   bind(&entry);
   cmp(start_offset, end_offset);
@@ -3490,7 +3491,8 @@ void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
     stw(scratch, MemOperand(sp));
 #else
     // On the simulator we pass args on the stack
-    stw(scratch, MemOperand(sp, stack_passed_arguments * kPointerSize));
+    StoreWord(scratch,
+              MemOperand(sp, stack_passed_arguments * kPointerSize), r0);
 #endif
   } else {
     // this case appears to never beused on PPC (even simulated)
@@ -3610,7 +3612,7 @@ void MacroAssembler::CallCFunctionHelper(Register function,
     lwz(sp, MemOperand(sp));
 #else
     // On the simulator we pass args on the stack
-    lwz(sp, MemOperand(sp, stack_passed_arguments * kPointerSize));
+    LoadWord(sp, MemOperand(sp, stack_passed_arguments * kPointerSize), r0);
 #endif
   } else {
     // this case appears to never beused on PPC (even simulated)
@@ -3691,7 +3693,7 @@ void MacroAssembler::HasColor(Register object,
   and_(r0, ip, mask_scratch, SetRC);
   b(first_bit == 1 ? eq : ne, &other_color, cr0);
   // Shift left 1
-  rlwinm(mask_scratch, mask_scratch, 1, 0, 30, SetRC);
+  slwi(mask_scratch, mask_scratch, Operand(1), SetRC);
   beq(&word_boundary, cr0);
   and_(r0, ip, mask_scratch, SetRC);
   b(second_bit == 1 ? ne : eq, has_color, cr0);
@@ -3734,10 +3736,13 @@ void MacroAssembler::GetMarkBits(Register addr_reg,
   ASSERT((~Page::kPageAlignmentMask & 0xffff) == 0);
   lis(r0, Operand((~Page::kPageAlignmentMask >> 16)));
   and_(bitmap_reg, addr_reg, r0);
-  rlwinm(mask_reg, addr_reg, 32-kPointerSizeLog2,
-         32-Bitmap::kBitsPerCellLog2, 31);
   const int kLowBits = kPointerSizeLog2 + Bitmap::kBitsPerCellLog2;
-  rlwinm(ip, addr_reg, 32-kLowBits, 32-(kPageSizeBits - kLowBits), 31);
+  ExtractBitRange(mask_reg, addr_reg,
+                  31 - kLowBits + 1,
+                  31 - kPointerSizeLog2);
+  ExtractBitRange(ip, addr_reg,
+                  31 - kPageSizeBits + 1,
+                  31 - kLowBits);
   slwi(ip, ip, Operand(kPointerSizeLog2));
   add(bitmap_reg, bitmap_reg, ip);
   li(ip, Operand(1));

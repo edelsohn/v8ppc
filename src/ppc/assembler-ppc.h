@@ -521,41 +521,26 @@ class MemOperand BASE_EMBEDDED {
   explicit MemOperand(Register rn, int32_t offset = 0, AddrMode am = Offset);
 
   // ARM only
-  explicit MemOperand(Register rn, Register rm, AddrMode am = Offset);
-
-  // ARM only
   explicit MemOperand(Register rn, Register rm,
                       ShiftOp shift_op, int shift_imm, AddrMode am = Offset);
 
-  void set_offset(int32_t offset) {
-      ASSERT(rm_.is(no_reg));
-      offset_ = offset;
-  }
-
   uint32_t offset() const {
-      ASSERT(rm_.is(no_reg));
+      ASSERT(validPPCAddressing_);
       return offset_;
   }
 
   // PowerPC - base register
-  Register ra() const { return ra_; }
-
-  // ARM stuff
-  Register rn() const { return ra_; }
-  Register rm() const { return rm_; }
-  AddrMode am() const { return am_; }
-
-  bool OffsetIsUint12Encodable() const {
-    return offset_ >= 0 ? is_uint12(offset_) : is_uint12(-offset_);
+  Register ra() const {
+      ASSERT(validPPCAddressing_);
+      return ra_;
   }
+
+  bool isPPCAddressing() const { return validPPCAddressing_;}
 
  private:
   Register ra_;  // base
-  Register rm_;  // register offset
   int32_t offset_;  // valid if rm_ == no_reg
-  ShiftOp shift_op_;
-  int shift_imm_;  // valid if rm_ != no_reg && rs_ == no_reg
-  AddrMode am_;  // bits P, U, and W
+  bool validPPCAddressing_;
 
   friend class Assembler;
 };
@@ -799,6 +784,10 @@ class Assembler : public AssemblerBase {
   static const int kDebugBreakSlotLength =
       kDebugBreakSlotInstructions * kInstrSize;
 
+  static inline int encode_crbit(const CRegister& cr, enum CRBit crbit) {
+    return ((cr.code() * CRWIDTH) + crbit);
+  }
+
   // ---------------------------------------------------------------------------
   // Code generation
 
@@ -836,31 +825,80 @@ class Assembler : public AssemblerBase {
   }
   void b(Condition cond, Label* L, CRegister cr = cr7)  {
     ASSERT(cr.code() >= 0 && cr.code() <= 7);
-    switch (cond) {
-      case al:
-        b(L);
-        break;
-      case eq:
-        bc(branch_offset(L, false), BT, 2 + (cr.code() * 4));
-        break;
-      case ne:
-        bc(branch_offset(L, false), BF, 2 + (cr.code() * 4));
-        break;
-      case gt:
-        bc(branch_offset(L, false), BT, 1 + (cr.code() * 4));
-        break;
-      case le:
-        bc(branch_offset(L, false), BF, 1 + (cr.code() * 4));
-        break;
-      case lt:
-        bc(branch_offset(L, false), BT, 0 + (cr.code() * 4));
-        break;
-      case ge:
-        bc(branch_offset(L, false), BF, 0 + (cr.code() * 4));
-        break;
-      default:
-        fake_asm(fBranch);
-        // UNIMPLEMENTED();
+    int b_offset = branch_offset(L, (cond == al));
+    // if the offset fits in the 16-bit immediate
+    // field (b-form) we use that, otherwise use a
+    // branch conditional to the i-form which gives
+    // us 26 bits
+    if (is_int16(b_offset)) {
+      switch (cond) {
+        case al:
+          b(L);
+          break;
+        case eq:
+          bc(b_offset, BT, encode_crbit(cr, CR_EQ));
+          break;
+        case ne:
+          bc(b_offset, BF, encode_crbit(cr, CR_EQ));
+          break;
+        case gt:
+          bc(b_offset, BT, encode_crbit(cr, CR_GT));
+          break;
+        case le:
+          bc(b_offset, BF, encode_crbit(cr, CR_GT));
+          break;
+        case lt:
+          bc(b_offset, BT, encode_crbit(cr, CR_LT));
+          break;
+        case ge:
+          bc(b_offset, BF, encode_crbit(cr, CR_LT));
+          break;
+        default:
+          fake_asm(fBranch);
+          // UNIMPLEMENTED();
+      }
+    } else {
+      // as mentioned above, somewhat of a hack here:
+      // use the bc to branch to the i-form instruction
+      // else fall through and branch over it
+      switch (cond) {
+        case al:
+          b(b_offset, LeaveLK);
+          break;
+        case eq:
+          bc(kInstrSize*2, BT, encode_crbit(cr, CR_EQ));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        case ne:
+          bc(kInstrSize*2, BF, encode_crbit(cr, CR_EQ));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        case gt:
+          bc(kInstrSize*2, BT, encode_crbit(cr, CR_GT));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        case le:
+          bc(kInstrSize*2, BF, encode_crbit(cr, CR_GT));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        case lt:
+          bc(kInstrSize*2, BT, encode_crbit(cr, CR_LT));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        case ge:
+          bc(kInstrSize*2, BF, encode_crbit(cr, CR_LT));
+          b(kInstrSize*2, LeaveLK);
+          b(b_offset, LeaveLK);
+          break;
+        default:
+          fake_asm(fBranch);
+          // UNIMPLEMENTED();
+      }
     }
   }
   void bne(Label* L, CRegister cr = cr7) {
@@ -967,8 +1005,10 @@ class Assembler : public AssemblerBase {
               RCBit rc = LeaveRC);
   void rlwimi(Register ra, Register rs, int sh, int mb, int me,
               RCBit rc = LeaveRC);
-  void slwi(Register dst, Register src, const Operand& val);
-  void srwi(Register dst, Register src, const Operand& val);
+  void slwi(Register dst, Register src, const Operand& val, RCBit rc = LeaveRC);
+  void srwi(Register dst, Register src, const Operand& val, RCBit rc = LeaveRC);
+  void clrrwi(Register dst, Register src, const Operand& val,
+              RCBit rc = LeaveRC);
   void srawi(Register ra, Register rs, int sh, RCBit r = LeaveRC);
   void srw(Register dst, Register src1, Register src2, RCBit r = LeaveRC);
   void slw(Register dst, Register src1, Register src2, RCBit r = LeaveRC);
@@ -1129,7 +1169,8 @@ class Assembler : public AssemblerBase {
   // Exception-generating instructions and debugging support
   void stop(const char* msg,
             Condition cond = al,
-            int32_t code = kDefaultStopCode);
+            int32_t code = kDefaultStopCode,
+            CRegister cr = cr7);
 
   void bkpt(uint32_t imm16);  // v5 and above
   void svc(uint32_t imm24, Condition cond = al);
