@@ -91,7 +91,11 @@ void MacroAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
 
 
 int MacroAssembler::CallSize(Register target, Condition cond) {
+#ifdef _AIX
+  return 4 * kInstrSize;
+#else
   return 2 * kInstrSize;
+#endif
 }
 
 
@@ -107,8 +111,15 @@ void MacroAssembler::Call(Register target, Condition cond) {
   positions_recorder()->WriteRecordedPositions();
 
   // branch via link register and set LK bit for return point
+#ifdef _AIX
+  lwz(r0, MemOperand(target, 0));
+  lwz(ToRegister(2), MemOperand(target, 4));
+  mtlr(r0);
+#else
   mtlr(target);
+#endif
   bclr(BA, SetLK);
+
   ASSERT_EQ(CallSize(target, cond), SizeOfCodeGeneratedSince(&start));
 }
 
@@ -130,7 +141,11 @@ int MacroAssembler::CallSize(
   movSize = 2;
 #endif
 
+#ifdef _AIX
+  size = (4 + movSize) * kInstrSize;
+#else
   size = (2 + movSize) * kInstrSize;
+#endif
 
 #if 0
   Instr mov_instr = cond | MOV | LeaveCC;
@@ -149,7 +164,11 @@ int MacroAssembler::CallSizeNotPredictableCodeSize(
   PPCPORT_UNIMPLEMENTED();  // Always fail
   return 0;
 #else
+#ifdef _AIX
+  int size = 4 * kInstrSize;
+#else
   int size = 2 * kInstrSize;
+#endif
   Instr mov_instr = cond | MOV | LeaveCC;
   intptr_t immediate = reinterpret_cast<intptr_t>(target);
   if (!Operand(immediate, rmode).is_single_instruction(NULL, mov_instr)) {
@@ -180,7 +199,13 @@ void MacroAssembler::Call(Address target,
   //
 
   mov(ip, Operand(reinterpret_cast<int32_t>(target), rmode));
+#ifdef _AIX
+  lwz(r0, MemOperand(ip, 0));
+  lwz(ToRegister(2), MemOperand(ip, 4));
+  mtlr(r0);
+#else
   mtlr(ip);
+#endif
   bclr(BA, SetLK);
 
   ASSERT(kCallTargetAddressOffset == 4 * kInstrSize);
@@ -1192,7 +1217,13 @@ void MacroAssembler::InvokeCode(Register code,
     if (flag == CALL_FUNCTION) {
       call_wrapper.BeforeCall(CallSize(code));
       SetCallKind(r8, call_kind);
+#ifdef _AIX
+      stw(code, MemOperand(sp, 12));
+      addi(r11, sp, Operand(12));
+      Call(r11);
+#else
       Call(code);
+#endif
       call_wrapper.AfterCall();
     } else {
       ASSERT(flag == JUMP_FUNCTION);
@@ -2825,7 +2856,13 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
   if (flag == CALL_FUNCTION) {
     call_wrapper.BeforeCall(CallSize(r2));
     SetCallKind(r8, CALL_AS_METHOD);
+#ifdef _AIX
+    stw(r5, MemOperand(sp, 12));
+    addi(r11, sp, Operand(12));
+    Call(r11);
+#else
     Call(r5);
+#endif
     call_wrapper.AfterCall();
   } else {
     ASSERT(flag == JUMP_FUNCTION);
